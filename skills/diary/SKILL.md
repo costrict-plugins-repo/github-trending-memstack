@@ -1,0 +1,349 @@
+---
+name: diary
+description: "Use when the user says 'save diary', 'log session', 'wrapping up', or at end of a productive session."
+version: 1.1.0
+---
+
+
+# 📓 Diary: Logging Session...
+*Document what was accomplished in each CC session for future recall.*
+
+## Activation
+
+When this skill activates, output:
+
+`📓 Diary: Logging session...`
+
+Then execute the protocol below.
+
+## Context Guard
+
+| Context | Status | Priority |
+|---------|--------|----------|
+| **User says "save diary", "log session", "write diary"** | ACTIVE: write diary | P1 |
+| **User explicitly says they're done ("that's it", "wrapping up")** | ACTIVE, suggest diary if work was done | P2 |
+| **Multi-agent session (Builder/Reviewer role)** | DORMANT: Manager handles diary | none |
+| **Mid-session, user is actively coding** | DORMANT, don't interrupt flow | none |
+| **Casual conversation, no code changes made** | DORMANT: nothing to log | none |
+| **User asks to recall past sessions ("what did we do")** | DORMANT, Echo handles recall, not Diary | none |
+| **User says "save project" or "handoff"** | DORMANT, Project skill handles this | none |
+| **Session just started, no work yet** | DORMANT: nothing to log | none |
+
+## When NOT to Fire
+
+- **Do NOT fire autonomously.** Only activate when the user explicitly requests it ("save diary", "log session", "wrapping up").
+- **Multi-agent sessions:** If you are operating as Builder, Reviewer, or any non-Manager agent in a multi-agent session, do NOT fire diary. Only the Manager or a standalone session should trigger diary.
+- **No work done:** If no meaningful changes were made (no commits, no file edits), skip diary.
+
+## Reminders
+
+When the user asks to save a diary, keep these in mind:
+
+| Temptation | Why it matters |
+|---|---|
+| "Nothing important happened" | Even small decisions are worth recording: what was decided, and who decided it. |
+| "Commits capture everything" | Commits don't capture decisions, blockers, or next steps. |
+| "Skip the handoff section" | Handoffs are the most valuable part for session continuity. |
+
+## Protocol
+
+**Never pass a JSON payload as a quoted command-line argument. Write it to a file and pipe it in with the dash sentinel, as every command below shows. On Windows, cmd.exe treats single quotes as ordinary characters, so a redirection operator anywhere in a quoted payload is executed rather than passed.**
+
+**All JSON field values must be plain strings. Never pass arrays or objects. If multiple items (files, commits, decisions), join them as a comma-separated string.**
+
+1. **Summarize the session:**
+   - Project name and working directory
+   - Date and approximate duration
+   - What was built or changed
+   - Key files created or modified
+   - Commits made (hashes and messages)
+   - Decisions as made and who made each: a user decision with its reason as stated in the session, the task prompt or a commit message; a session choice as what was chosen
+   - Problems as they appeared (the error or failing check) and the fix as applied
+
+2. **Check git log** for commits:
+   ```bash
+   git log --oneline -10
+   ```
+
+3. **Format the diary entry:**
+   ```markdown
+   # Session Diary: {project}, {date}
+
+   ## Accomplished
+   - Item 1...
+
+   ## Files Changed
+   - path/to/file.ts: description
+
+   ## Commits
+   - abc1234 Message
+
+   ## Decisions
+   - User decision: what was decided. Stated reason: as quoted from the session, the task prompt or a commit message, or "none stated"
+   - Session choice: what was chosen
+
+   ## Next Steps
+   - What to do next
+
+   ## Session Handoff
+   **In Progress:** [what was actively being worked on when session ended]
+   **Uncommitted Changes:** [list any unstaged/uncommitted work, or "None"]
+   **Pick Up Here:** [exact instruction for next session, specific enough to start cold]
+   **Session Context:** [anything important that isn't captured elsewhere, as observed: temporary decisions and who made them, the debugging state as last seen (what was run and what it showed), gotchas found]
+   ```
+
+4. **Save to SQLite database** (primary storage):
+
+   Write the payload to a file, then pipe it in with `-` as the argument. A payload on stdin is never seen by the shell's parser, so a redirection operator inside your prose cannot be read as one.
+
+   ```bash
+   cat session.json | python "${CLAUDE_PLUGIN_ROOT}/db/memstack-db.py" add-session -
+   ```
+
+   The store is `~/.memstack/memstack.db`, one file per user, never a file beside the script. Every command prints the path it used on stderr as `memstack-db: store <path>`, so a session can confirm where it wrote instead of assuming.
+
+   **The SQLite row is the primary store. The markdown in `memory/sessions/` is
+   a backup export.** The row holds the full `raw_markdown`, so a markdown file
+   that is lost, truncated or overwritten can be restored from it: find the row
+   in the `sessions` table by project and date, and write `raw_markdown` back to
+   the file. This matters because `memory/` is gitignored, so version control is
+   not a fallback and the database is the only one there is.
+
+   `session.json` contains:
+   ```json
+   {"project":"<name>","date":"<YYYY-MM-DD>","accomplished":"<bullets>","files_changed":"<bullets>","commits":"<bullets>","decisions":"<bullets>","problems":"<bullets>","next_steps":"<bullets>","duration":"<estimate>","raw_markdown":"<full text>"}
+   ```
+
+5. **Save insights** for cross-project search:
+
+   Same form: write the payload to a file, pipe it in, `-` as the argument. Insight text is prose, so it must never travel on the command line.
+
+   ```bash
+   cat insight.json | python "${CLAUDE_PLUGIN_ROOT}/db/memstack-db.py" add-insight -
+   ```
+
+   `insight.json` contains:
+   ```json
+   {"project":"<name>","type":"<type>","content":"<insight>","context":"Session <date>","tags":"<project>"}
+   ```
+
+   Choose `<type>` deliberately from this vocabulary, do not default to one:
+   - `gotcha`: something that bit us and the fix. Non-obvious behavior a future session would trip on again.
+   - `lesson`: a general rule learned the hard way. Broader than one bug.
+   - `pattern`: a reusable approach or convention that worked.
+   - `warning`: a known hazard to avoid. Not yet a bug, but will be.
+   - `failed_approach`: something tried that did not work, and the failure as observed (the error, the test result). Prevents retrying it.
+   - `architecture`: a structural fact about how a system is built.
+   - `decision`: a decision as made and who made it, with the reason only as already recorded (the user's words, the task prompt or a commit message). Historical record.
+
+   The first five are **procedural**: an agent can act on them at retrieval time. `architecture` and `decision` are **record**. When a row could be either, prefer the procedural type.
+
+   Unknown types pass through unchanged but come back as `type_unknown` in the JSON response, that is the signal to pick a type from the list above.
+
+   **CRITICAL: The field name is "content", NOT "insight". Using "insight" will fail with a missing required field error.**
+
+6. **Update project context** with last session date:
+
+   Same form, even though this payload is only metadata. One rule with no exceptions is easier to follow than a rule you have to judge.
+
+   ```bash
+   cat context.json | python "${CLAUDE_PLUGIN_ROOT}/db/memstack-db.py" set-context -
+   ```
+
+   `context.json` contains:
+   ```json
+   {"project":"<name>","last_session_date":"<YYYY-MM-DD>"}
+   ```
+
+7. **Also save a markdown copy** to `memory/sessions/`, under a name nothing
+   already occupies. Append a `## FACTS` block (see below) as the **last**
+   section of this markdown.
+
+   **Compute the filename immediately before writing it, not at the start of
+   the task.** List `memory/sessions/` and take the first free name:
+
+   | Attempt | Name |
+   |---------|------|
+   | 1st diary of the day for this project | `{date}-{project}.md` |
+   | 2nd | `{date}-{project}-2.md` |
+   | 3rd | `{date}-{project}-3.md` |
+
+   There is no `-1`: the plain name is the first, so the numbers you see in the
+   directory match how many diaries exist for that day.
+
+   The check has to happen at the moment of the write because a session can run
+   for hours, and another session, or an agent run, can file a diary for the
+   same project in between. A name that was free when the task started is not
+   evidence that it is free now.
+
+   **Never write over an existing file.** If the name you computed exists when
+   you go to write it, stop and report it rather than writing. Do not overwrite,
+   do not append, do not pick a name by guessing. A diary is another session's
+   only human-readable record, and the Write tool reporting "updated" instead of
+   "created" is the only warning you will get, which is far too quiet to rely on.
+
+   **A suffixed filename changes step 8.** `diary_ingest` derives the project
+   namespace from the filename, so `2026-09-06-myproject-2.md` derives
+   `myproject-2`, which ingests cleanly, exits 0, and is invisible to every
+   recall for the real project. Whenever the name carries a `-N` suffix, pass
+   `--project` explicitly.
+
+8. **Ingest the FACTS block** into the Memory Engine, right after the markdown is written:
+ ```bash
+ python -m memstack_skill_loader.diary_ingest "memory/sessions/{the name you just wrote}" --project {project}
+ ```
+ This parses the `## FACTS` block and stores each fact with `source_type='diary'`.
+
+ **Read the summary it prints. This step is not fire-and-forget.** It reports `memory-ingest: N ingested, M duplicate, K skipped into project 'NAME': PATH` on stdout, followed by one indented reason per skipped line naming the line number and what was wrong with it. `NAME` is the namespace the facts were actually written to, derived from the diary's filename, and it is the part to check: a diary filed under an unintended project ingests cleanly and exits 0 while staying invisible to every recall for the real one. When no fact has ever been stored under that namespace the line reads `into NEW project 'NAME'`, which is the cheapest signal that derivation landed somewhere unintended. Pass `--project NAME` to skip filename derivation entirely when the derived name would be wrong. The exit code classifies the outcome:
+
+ | Exit | Meaning |
+ |------|---------|
+ | **0** | Nothing was lost: facts ingested, an all-duplicates re-run, or no FACTS block at all (which prints nothing at all). |
+ | **1** | Total loss. The block held lines and not one of them ingested. |
+ | **2** | Store failure. The run aborted at the first bad row; the Memory Engine is broken, not the diary. |
+
+ **If K is not 0, fix those lines in the markdown and run the command again.** A skipped line is a fact this session was supposed to hand to the next one and did not, and the most common cause is a `|` inside a claim. Re-running is safe: facts dedupe on source + subject + claim, so anything already stored comes back as a duplicate rather than being written twice.
+
+ A non-zero exit never means the diary failed to save. The markdown and the SQLite row are already written by this point, and ingestion cannot undo them.
+
+## FACTS Block: Cross-Session Memory
+
+The `## FACTS` block is how a session hands durable, atomic knowledge to future sessions. It is machine-parsed, so the format is fixed. **One fact per line:**
+
+```
+subject | claim | method [| entities]
+```
+
+- **subject**: a dotted-path namespace, lowercase (e.g. `memstack.dashboard.start`, `adminstack.portal.auth`). Group related facts under a shared prefix.
+- **claim**: exactly one assertion. Keep it self-contained. Must not contain a `|`.
+- **method**: how you *know* it, one of: `verified` (you saw it work / read the code / ran it), `reported` (stated but unconfirmed), `inferred` (deduced), `assumed` (a guess: scored lowest).
+- **entities**: *optional* 4th field: comma-separated tags this fact touches.
+
+### Examples (note the granularity)
+
+```
+## FACTS
+memstack.dashboard.start | start_dashboard() in dashboard.py, port 3333, proxy opt-in | verified
+memstack.memory.recall-scoring | recall score = confidence * exp(-age/half_life), computed at query time, never stored | verified
+adminstack.portal.auth | portal uses Supabase magic-link auth, not passwords | reported | supabase, auth
+memstack.memory.corrections | a superseded fact cannot be corrected; corrections extend from the live tip | verified | correction
+```
+
+### What to include
+
+- **Only facts worth remembering across sessions.** Not "ran the tests", that's in the diary body. A fact is something a future session would waste time rediscovering: a port, an entry point, an auth model, a non-obvious constraint.
+- **Prefer `verified` over `reported`.** If you actually confirmed it, say so, verified facts are trusted and decay slowest. Don't inflate: an unconfirmed claim is `reported`.
+- **Corrections of prior beliefs are the most valuable entries.** If this session overturned something an earlier session believed ("the port is 3333, not 8080"; "auth is magic-link, not passwords"), record the corrected claim as a fact, that is exactly the knowledge that stops the team repeating a mistake.
+
+## Known Gotchas
+
+| Gotcha | Why it matters |
+|--------|----------------|
+| The markdown filename is computed, never assumed | On 2026-09-06 a session wrote `memory/sessions/2026-09-06-memstack-skill-loader.md` when a file of that name already existed, destroying 10238 characters of an earlier session's diary including its FACTS block. Nothing warned: the Write tool said "updated" rather than "created" and the session did not notice for several steps. Recovery was possible only because the SQLite `sessions` table still held that row's `raw_markdown`. `memory/` is gitignored, so there was no version-control fallback and no second chance if the row had been missing. |
+| A free name goes stale | The scan belongs immediately before the write. Sessions run long, and agent runs file diaries for the same project while one is open. |
+| A `-N` suffix silently re-namespaces the FACTS | `diary_ingest` derives the project from the filename, so a suffixed diary ingests into `{project}-N` and exits 0 while being invisible to recall for the real project. Pass `--project` whenever the name is suffixed. |
+| The database is the only backup | The markdown is an export. If it is gone, restore it from `raw_markdown` in the `sessions` table rather than rewriting it from memory. |
+
+## Session File Size Management
+
+The 500-line limit on markdown files is no longer a concern since SQLite is the source of truth.
+Markdown files in `memory/sessions/` are now just human-readable exports.
+Old markdown files are preserved but not the primary storage.
+
+## Inputs
+- Current session context
+- Project name from working directory or config.json
+- Git log for commit history
+
+## Outputs
+- Session entry in SQLite database
+- Insights extracted from decisions
+- Markdown backup in memory/sessions/
+- Brief confirmation summary
+
+## Example Usage
+
+**User:** "save diary"
+
+```
+📓 Diary: Logging session...
+
+Saved: memory/sessions/2026-02-18-adminstack.md
+
+Project: AdminStack | Duration: ~2 hours
+Accomplished: Built CC Monitor page, API routes, setup guide
+Commits: 4 (45b4c42, d1c7e11, f6c8e18, f0e793f)
+Files changed: 8
+
+This session is now searchable via Echo.
+```
+
+## PreCompact Hook: Automatic Compaction Diary
+
+The diary system includes an automatic `PreCompact` hook that fires before Claude Code compresses the context window. This closes the gap where session context could be lost during long conversations.
+
+### Behavior
+- **Trigger:** Fires automatically before every CC context compaction: no user action required
+- **Output:** `.claude/diary/{date}-compaction.md`, one file per day, appends on multiple compactions
+- **Flag:** Every entry includes `COMPACTION_INTERRUPTED` so the next session knows context was cut
+- **Timeout:** 15 seconds, fast enough to never block compaction
+
+### What It Captures
+| Data | Source |
+|------|--------|
+| Uncommitted changes | `git status --short` |
+| Recent commits | `git log --oneline -5` |
+| Recent shell commands | Shell history (last 5) |
+| Recently modified files | Files modified since last git operation |
+| Branch and project | Git branch + directory name |
+
+### How It Differs from Manual Diary
+| | Manual Diary | PreCompact Diary |
+|---|---|---|
+| **Trigger** | User says "save diary" | Automatic before compaction |
+| **Content** | Full narrative with decisions, handoff | Snapshot of working state |
+| **Storage** | SQLite + `memory/sessions/` | `.claude/diary/` only |
+| **Purpose** | Session documentation | Context recovery after compaction |
+
+### Session Resume
+When resuming after compaction, check `.claude/diary/` for entries with today's date. The `COMPACTION_INTERRUPTED` flag signals that the previous context was truncated and these files contain the lost state.
+
+### Configuration
+Hook is registered in `.claude/settings.json` under `PreCompact`. Script lives at `.claude/hooks/pre-compact.sh`. Always exits 0: must never block compaction.
+
+## Full Hook System (v3.3.2)
+
+The Diary skill is part of a broader hook system that automates session lifecycle, security, and observability. All hooks follow the same defensive pattern: `set -uo pipefail`, `SCRIPT_DIR` resolution, all external commands wrapped with fallbacks, guaranteed `exit 0`.
+
+### Hook Registry: 7 hooks across 5 events
+
+| Event | Script | Matcher | Timeout | Purpose |
+|-------|--------|---------|---------|---------|
+| **PreToolUse** | `pre-tool-notify.sh` | `Write\|Edit\|MultiEdit\|Bash` | 10s | TTS voice alert before approval prompts |
+| **PreToolUse** | `pre-push.sh` | `Bash` (git push) | 60s | Build verification + secrets scan before push |
+| **PostToolUse** | `post-commit.sh` | `Bash` (git commit) | 10s | Debug artifact + secrets scan after commit |
+| **PostToolUse** | `post-tool-monitor.sh` | `Write\|Edit\|MultiEdit\|Bash` | 10s | Observation capture, logs tool calls to `.claude/observations/` |
+| **SessionStart** | `session-start.sh` | *(all)* | 10s | CLAUDE.md indexing, monitoring ping |
+| **SessionStart** | `session-context-load.sh` | *(all)* | 15s | Context injection, last 3 diary + observation summaries → `.claude/session-context.md` |
+| **Stop** | `session-end.sh` | *(all)* | 10s | Monitoring API session-complete ping |
+| **PreCompact** | `pre-compact.sh` | *(all)* | 15s | Auto-save diary snapshot before context compaction |
+
+### Architecture Notes
+
+- Each hook is registered as an **independent entry** (Option B) in `settings.json`, giving it its own timeout budget
+- PreToolUse hooks can **block** tool execution (exit 2 = block). All other hooks are non-blocking
+- PostToolUse observation monitor writes to `.claude/observations/YYYY-MM-DD.md`: daily files, append-only
+- SessionStart context loader is **idempotent**: overwrites `.claude/session-context.md` on each new session
+- Both `.claude/observations/` and `.claude/session-context.md` are in `.gitignore` (ephemeral runtime output)
+- All scripts live in `.claude/hooks/` and use `${CLAUDE_PROJECT_DIR}` for portable path resolution
+
+## Level History
+
+- **Lv.1**: Base: Session logging with git integration. (Origin: MemStack v1.0, Feb 2026)
+- **Lv.2**: Enhanced: Added YAML frontmatter, context guard, 500-line limit with archive, activation message. (Origin: MemStack v2.0 MemoryCore merge, Feb 2026)
+- **Lv.3**: Advanced: SQLite as primary storage, auto-extract insights from decisions, markdown as backup export. (Origin: MemStack v2.1 Accomplish-inspired upgrade, Feb 2026)
+- **Lv.4**: Native: CC rules integration (`.claude/rules/diary.md`), always-on session logging awareness without skill file read. (Origin: MemStack v3.0-beta, Feb 2026)
+- **Lv.5**: Handoff: Added structured Session Handoff section: in-progress work, uncommitted changes, exact pickup instructions, session context preservation. (Origin: MemStack v3.1, Feb 2026)
+- **Lv.6**: PreCompact: Added automatic PreCompact hook: saves working state snapshot before CC context compaction, captures uncommitted changes, recent commands, and modified files with COMPACTION_INTERRUPTED flag. (Origin: MemStack v3.3.1, Mar 2026)
+- **Lv.7**: Hook System: Documented full 7-hook system across 5 CC lifecycle events: PreToolUse (TTS + pre-push), PostToolUse (post-commit + observation monitor), SessionStart (Headroom + context injection), Stop, PreCompact. (Origin: MemStack v3.3.2, Mar 2026)
+- **Lv.8**: FACTS Ingestion: Added the `## FACTS` block, atomic, machine-parsed cross-session knowledge (subject | claim | method | entities) ingested into the Memory Engine via `diary_ingest` after each save. Fail-open, dedupe-safe, corrections-first. (Origin: MemStack Memory Engine step 4, Jul 2026)

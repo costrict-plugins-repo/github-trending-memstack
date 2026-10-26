@@ -1,0 +1,18 @@
+{
+  "version": "3.2.2",
+  "author": "Your Name or Company",
+  "projects": {
+    "my-app": {
+      "dir": "~/projects/my-app",
+      "claude_md": "~/projects/my-app/CLAUDE.md",
+      "deploy_target": "netlify",
+      "repo": "github.com/youruser/my-app"
+    },
+    "another-project": {
+      "dir": "~/projects/another-project",
+      "claude_md": "~/projects/another-project/CLAUDE.md",
+      "deploy_target": "railway",
+      "repo": "github.com/youruser/another-project"
+    }
+  }
+}

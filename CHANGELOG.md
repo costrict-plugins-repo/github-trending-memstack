@@ -1,0 +1,660 @@
+# MemStack™ Changelog
+
+## v3.10.4 - 2026-10-24 - The diary records reasons as stated, not reasoning
+
+### Changed
+- **The diary skill now records what happened and who decided it, not a narrative of reasoning.** Decisions are recorded as made and with who made them: a user's decision carries its reason only as stated in the session, the task prompt or a commit message, and a choice made by the session is recorded as what was chosen. Problems are recorded as they appeared, with the fix as applied, and failed approaches with the failure as observed. The `decision` and `failed_approach` insight types say the same. Section names, the FACTS format, the filename rule, the ingest call and the skip rules are unchanged.
+- **Why this was reviewed.** Issue #19 reported the diary turn being declined by Opus 5.5's safeguards as reasoning extraction. A short session does not reproduce it, and the report is filed upstream as anthropics/claude-code#104825. The wording change is a correctness fix to what the diary records, because a fact in the diary should carry provenance and an after-the-fact account of reasoning does not. It is not a workaround for the report.
+
+### Fixed
+- **Two selftest cases that failed since the report marker began deferring to the working-directory guard now declare a directory the guard accepts.** `short-prompts-never-arm` names the repo under test in its control prompt, and its short half also asserts that the length floor, not the guard, kept it quiet. `prefix-follows-the-named-working-directory` names a child of the launch directory, because the guard now refuses an unrelated repo, and a child still has a leaf that differs from the cwd's. No assertion was weakened; the marker and the guard are unchanged. Selftest is 36 of 36.
+
+### Notes
+- Plugin-load gate PASS before the version moved, 87 of 87 SKILL.md registered: receipt `.memstack/receipts/plugin-load-20261024T130549Z.json`.
+
+## v3.10.3 - 2026-10-18 - A session-store source path containing # is opened as written
+
+### Fixed
+- **A source path containing a `#` character is no longer cut short when the session store opens it.** The session-store CLI and the one-time legacy adoption built a SQLite URI by string interpolation, so a source path containing `#` was cut at the `#` and lost both the rest of the path and `?mode=ro`. `import-sessions` then reported `ok: true` with zero rows and every table absent, and opened read-write, creating a stray empty file beside the source. Source paths are now converted with `Path.as_uri()` before `?mode=ro` is appended. Reported and fixed by Wu Shuwen (dajiaohuang) in PR 17.
+
+### Notes
+- **A follow-up test adjustment in a5d6610.** The new CLI regression test pointed `MEMSTACK_SESSION_DB` at a home store that did not exist yet, which triggers legacy adoption and copied a real `db/memstack.db` on any checkout holding one. It now creates the home store first, so adoption returns early.
+- Plugin-load gate PASS before the version moved: receipt `.memstack/receipts/plugin-load-20261018T232531Z.json`.
+
+## v3.10.2 - 2026-09-26 - A prompt pasted into the wrong session is refused before it runs
+
+### Added
+- **A working-directory guard, registered on UserPromptSubmit beside the report marker.** A task prompt names its directory on a `Working directory:` line. Pasted into a Claude Code window open on a different repository, it used to run anyway, in the wrong tree. The guard reads that declaration and refuses the prompt when it contradicts the session's cwd, naming both paths so the user can see which window they meant. It reads the line from two places: inside the wrapper Claude Code puts around a longer paste, and from the prompt's first non-blank line, which is where a short paste's routing line sits because a short paste arrives with no wrapper at all. Both paths are normalized (case, slash direction, trailing slash, the Git Bash `/c/...` form) before comparison, and a declared parent or child of the cwd passes, so a worktree, a monorepo subdirectory, or a prompt naming the repo root from a subdirectory is never refused. The block is exit 0 with a decision object on stdout, never exit 2: exit 2 on this event erases the prompt, while the decision object shows the user their prompt back, so a refusal loses nothing.
+- **Kill switch `MEMSTACK_NO_WORKDIR_GUARD=1`**, checked before the payload is read, with one stderr line saying the prompt was not examined. Documented in the README hook section beside the other switches.
+
+### Changed
+- **The report marker no longer arms for a prompt the working-directory guard refuses.** The two hooks run in parallel on the same payload, so the marker used to be written for a prompt that never ran, and the Stop gate then demanded a report for it. report-marker now asks the guard's own decision function before writing. Both are pure functions of one payload, so they agree without any ordering between the parallel hooks. A switched-off guard refuses nothing, so the marker arms as before.
+- **`run-hook.cmd` gains a `workdir-guard` branch in both halves.** Like report-marker it discards the child's exit code, because the block travels on stdout, which the child inherits unredirected. Unlike report-marker it fails open loud: with no usable python or no guard script it prints a DEGRADED line to stderr and lets the prompt through.
+
+### Known gaps
+- **A typed first-line declaration is refused exactly as a paste would be.** A short paste and a typed prompt reach the hook as identical bytes, so there is nothing to tell them apart. A declaration that contradicts the cwd is wrong whichever way it arrived, and the refusal shows the prompt back for re-sending in the right window.
+- **A `Working directory:` line that is neither wrapped nor on the first non-blank line is treated as prose and not checked.** That is what keeps a quoted diary excerpt or a path mentioned in a question from being refused, and it means a routing line placed lower in an unwrapped prompt is missed.
+- **Any doubt passes.** A relative path, a UNC path, a dot segment, a metacharacter, an unreadable payload or an unusable cwd all let the prompt through silently, because a guard that gates every prompt of every session and false-blocks even occasionally trains its user to stop reading it.
+- **A session opened in one repository and deliberately pointed at an unrelated one by its first line is now refused.** The report skill's prefix rule still names the report for the prompt's directory; that case simply no longer reaches it unless the two directories are parent and child.
+
+### Notes
+- **The guard stays in `scripts/` beside `verify.py`, not in `hooks/`.** The extensionless convention in `hooks/` exists for bash scripts, because Claude Code's Windows auto-detection prepends bash to a command string containing `.sh`. This is a python script dispatched by name through `run-hook.cmd`, exactly as the verify gate and report marker are, so no `.py` appears in any `hooks.json` command string, and it imports `verify.py` from its own directory.
+- **Phase-2 item for publish time: delete this repository's local registration.** The guard has been dogfooded through `.claude/settings.local.json`, which runs `scripts/workdir_guard.py` directly. That is the only registration firing today, because the installed plugin predates the guard. Once this version is installed, that entry and the plugin's would both fire on every prompt, so it is deleted at publish time, as the two guard entries were in 3.10.0. The file is gitignored, so the deletion is a local step and appears in no commit.
+
+## v3.10.1 - 2026-09-21 - The encoder verbs join the secret-read guard's blocked list
+
+### Changed
+- **The encoder and dumper verbs join the secret-read guard's blocked list: od, xxd, base64, hexdump, nl and tac.** They were listed as a known gap in 3.10.0 on the reasoning that they transform the bytes rather than print them. That reasoning does not survive contact with a terminal. od, xxd and hexdump print every byte of the file in another base, and base64 prints the whole file in an alphabet any decoder reverses in one step, so a value that reaches the scrollback encoded has still reached the scrollback, and the session, the transcript and anything reading either now hold it. Direct invocation against a matched path is refused exactly as cat is, with the same three recipes on stderr. base64 -d and base64 --decode are the same block and not a separate case: the direction of the transform does not change what lands on stdout. Nothing changes for these verbs against an ordinary file, and nothing changes for pipelines. cat of a matched path piped into base64 was already refused, on the cat stage, because each stage is judged on the paths it names; a matched path piped into sha256sum is still allowed, because what leaves that pipeline is a digest. All four of those properties are pinned by controls rather than left to be re-derived.
+
+### Known gaps
+Restated because a gate whose limits are unknown gets trusted past them, and because this release moves one item off the list. The byte-dumping class is no longer a gap. What remains: the secret-read guard does not judge a content-mode Grep whose path is a directory rather than a file, and a glob naming no guarded shape passes. The Write and Edit tools are not gated at all, so nothing stops a secret being written, only read. Both guards parse POSIX shell quoting and will judge a cmd.exe command line by rules that are not cmd.exe's. And a python or node one-liner that opens the file itself is still unmodelled, which is a limit of the approach rather than an omission from a list: an interpreter's whole purpose is to run text this gate does not parse.
+
+## v3.10.0 - 2026-09-21 - Two standing rules become gates that customers receive
+
+The secrets policy and the redirection rule were both prose. Prose is consulted after the intent has already formed, which is why each of them failed in the same way more than once: a live production key printed by a redaction regex that missed a suffixed variable name, and four 0-byte junk files created by a redirection operator nobody typed. Both are now hooks in the shipped plugin, so the decision is made before the tool call runs rather than remembered afterwards. Neither has been a customer-facing feature until now; both have been running against this repository only, registered in a settings file no customer reads.
+
+### Added
+- **A secret-read guard, registered on PreToolUse for Read, Bash and Grep.** It refuses a whole-file read of a secret-bearing path and answers with the safe alternative rather than a bare refusal, because a gate that only says no leaves the session to invent a workaround. Read is judged on the file path, Bash on the command's verbs and their path arguments, and Grep on its path or glob together with its output mode. The block message carries three recipes: a redacted copy, which rewrites every NAME=VALUE line to NAME=[REDACTED] by shape rather than against a name denylist and is then safe to read; `grep -n -o PATTERN`, which prints the match instead of the line; and a sha256 fingerprint, which answers whether two values are the same without either being emitted. The pattern list is conservative and exact, sample and example counterparts stay readable, and a project may extend it with a `.secretpaths` file at its root. The only identifier the script ever emits is the matched file's basename, never a path, never a command, never a byte of any file.
+- **A junk-write guard, registered on PreToolUse for Bash.** It parses the command the way a shell does, tracking quotes and escapes, and classifies the target of every top-level redirection operator: a filename shape is allowed, a code-fragment shape is refused. It also refuses a command whose quotes do not balance while a redirection operator is present anywhere in the text, which is the precondition for the entire defect class. Heredoc bodies are blanked before parsing, because a heredoc body is never parsed by the shell for redirections and is the recipe this guard teaches. Every 0-byte file in this project's ledger is covered: the three created from an npm lifecycle banner re-executed as shell input, the two named after identifiers written inside a quoted fragment, and the one named with a single backtick that appeared in a window containing no shell command at all.
+- **Kill switches for both, checked before either script does anything else.** `MEMSTACK_NO_SECRET_GUARD=1` and `MEMSTACK_NO_JUNK_GUARD=1` skip their guard entirely: no payload read, no decision, one line to stderr saying it was skipped. The line is not optional. A guard that was switched off and a guard that examined the call and allowed it are indistinguishable from the outside, and only one of those is a claim the hook has earned. Both are documented in the README's new hook section alongside `MEMSTACK_NO_UPDATE_CHECK`.
+- **The calibration corpus ships as a test fixture, and a pytest regression replays it against the shipped hook.** The junk guard's rules were tuned by replaying them over real command history until they blocked none of it; that measurement was true on the day it was taken and had no way of staying true. The replay reads the classifier out of the hook file and executes the half above its REPLAY_SPLIT marker, so the rules under test are the rules customers receive, and a tightened rule fails the suite the moment it starts refusing a shape this project actually uses.
+
+### Fixed
+- **`run-hook.cmd` could not forward a hook's exit code, so a blocking hook would have printed its message and then been ignored.** Each bash invocation in the wrapper sits inside a parenthesised `if` block ending in `exit /b %ERRORLEVEL%`, and cmd.exe expands that variable when it parses the block, before bash has run. The value forwarded was therefore always the one from before the block. This was measured, not inferred: the guard returned 2, a minimal batch wrapper returned 0, and the same wrapper with delayed expansion returned 2. Bare `exit /b` does not preserve it either, which was also measured. The three branches now use `setlocal enabledelayedexpansion` and `exit /b !ERRORLEVEL!`. The defect was invisible until now because `session-start`'s exit code never mattered and the `verify-gate` and `report-marker` branches forward from top level rather than from inside a block; those two are deliberately left untouched.
+
+### Known gaps
+Stated because a gate whose limits are unknown gets trusted past them. The secret-read guard does not judge a content-mode Grep whose path is a directory rather than a file, and a glob naming no guarded shape passes. It models the verbs that print a file whole and does not model the byte-dumping class, `od`, `xxd`, `base64`, `nl` and `tac`, nor a python or node one-liner that opens the file itself. The Write and Edit tools are not gated at all, so nothing stops a secret being written, only read. Both guards parse POSIX shell quoting and will judge a cmd.exe command line by rules that are not cmd.exe's. The junk-write guard deliberately allows a correctly quoted inline fragment containing an arrow: blocking that shape refuses more than forty commands this project genuinely runs, and that coverage was given up on purpose rather than overlooked.
+
+### Notes
+- **MINOR, not patch: this adds customer-facing behaviour that can refuse a tool call.** No skill is added, removed, renamed or recategorized, and the skill count is unchanged at 87 free and 131 total, backed by the load gate receipt at `.memstack/receipts/plugin-load-20260921T175702Z.json`, which reports 87 `SKILL.md` on disk, 87 registered by the real loader, and zero frontmatter warnings.
+- **The guards move from `.claude/hooks/` into the shipped `hooks/` tree.** The two are separate systems that share a repository: `.claude/hooks/` is addressed with `CLAUDE_PROJECT_DIR` and runs only against this project, while `hooks/` is addressed with `CLAUDE_PLUGIN_ROOT` and is the only tree a customer executes. The scripts are extensionless, following that tree's existing convention, because Claude Code's Windows auto-detection prepends bash to any command string containing `.sh` and would break the wrapper's cmd.exe dispatch.
+- **Zero false blocks against 2092 real commands.** The committed fixture holds 3094 records, of which 2091 are full text and 1003 are clipped at 120 characters by the observation monitor. Only the full-text slice carries the guarantee: a clipped command has unbalanced quotes and a severed final token by construction, so a block there is correct behaviour on the text it was given. The one-record difference from the calibration figure is a record dropped as secret-shaped before commit.
+- **The fixture was scanned for credentials before it was committed.** Every record was tested against six credential shapes and any match was dropped whole rather than redacted, because a redacted command is no longer the command that was run. Each pattern was first fired against a synthetic positive control, since four of them matched no real record and a pattern that cannot match is not evidence of absence. One record was dropped. The scan was then re-run against the written file and found nothing.
+- **Both guards fail open, loudly.** No python interpreter, or a payload that will not parse, prints a line beginning with DEGRADED and exits 0. A broken guard must never brick a session, and a silently broken guard must never be mistaken for a working one.
+- **This repository's own registration of the two guards is removed in this release commit.** Until now this repository registered them itself, in `.claude/settings.json`, because its own installed plugin is pinned to the published version and would otherwise have left the plugin's source tree ungated while the guards were being written. That held exactly one registration open at a time. From this version the plugin cache carries the hooks, so leaving the settings entries in place would make this repository alone fire both; they are deleted here, and no other project was ever affected.
+
+## v3.9.12 - 2026-09-07 - A written report can be amended, and the doctor moves to the loader
+
+### Added
+- **The `report` skill may amend a report it has already written, by appending a headed section.** The rule that a report is written once ended at the moment the session learned something the report should have said: a background command that finished after the write, a correction to a number the body states, a finding that arrived once the file was closed. Writing again was forbidden and correctly refused, and amending was not permitted, so the information reached the terminal and stopped there, which is not where the reader looks. Rule 7 permits an amendment to the file at the path the session recorded, wherever that path now is. It is appended under its own heading rather than folded into the body, because the reader may already have read the file, and a rewritten body makes them read all of it again to find the sentence that changed. It is never a second file: a second file is exactly the duplicate the Stop gate was fixed in 3.9.11 to stop producing, and it leaves the reader holding two reports for one request with nothing to say which is current.
+- **An amended report that was filed into a review subfolder is moved back to the top level.** Filing is the reader's signal that they are finished with a report, so an amendment left inside the review folder is a change they never see. Rule 8 promotes the file once the amendment is written. It moves only the file this session wrote, matched on the full name rather than on the shared date prefix, because that prefix covers every report the project filed that day and the others are not this session's to move. If a file of that name already sits at the top level the skill stops and reports rather than overwriting it or renaming around it: the amendment is already safe in the file it was appended to, and two files carrying one name is a state a person has to resolve by reading both. The promotion does not un-satisfy the Stop gate, which finds the recorded path gone, rescans, and re-records the file at its new level.
+
+### Changed
+- **The doctor diagnostic now lives in the loader, as a CLI subcommand a customer can actually run.** It reports which MemStack pieces are installed on a machine and whether they agree with each other. This repository held a maintainer-only copy at `scripts/doctor.py`, reachable through an npm script, and `scripts/` is not in the plugin's `files` list, so no customer could ever have run this copy. It was ported to the loader as `python -m memstack_skill_loader doctor`, where it ships to every install on PyPI, and where its hooks check reads the installed plugin cache rather than a source tree that only a maintainer has. The copy here is now removed: `scripts/doctor.py`, `tests/test_doctor_health.py`, and the `doctor` entry in `package.json`. A repository-wide search for the name returns nothing in any tracked file, and no check chain, manifest, or npm script referenced it.
+
+### Notes
+- **PATCH.** No skill is added, removed, renamed, or recategorized. The skill count is unchanged at 87 free and 131 total, backed by the load gate receipt at `.memstack/receipts/plugin-load-20260907T150742Z.json`, which reports 87 `SKILL.md` on disk, 87 registered by the real loader, and zero frontmatter warnings.
+- **The `report` skill's frontmatter description did not change in this cycle,** so the generated catalogs carry no new wording and were not regenerated.
+- **The selftest stands at 35 cases, all PASS,** with the failure path still demonstrated. Three of those cases came in with the amendment rules: one report amended twice with the bytes above each amendment compared, a filed report promoted back with the subfolder copy gone and the gate still satisfied afterwards, and a name collision that leaves the occupying file byte for byte unchanged, with the free-name control run second so that a helper which never promotes could not pass.
+
+## v3.9.11 - 2026-09-07 - The diary never overwrites, and the gate remembers what it accepted
+
+### Fixed
+- **The diary skill wrote to a fixed dated filename and could overwrite an existing diary.** On 2026-09-06 a session wrote `memory/sessions/2026-09-06-memstack-skill-loader.md` when a file of that name already existed, and destroyed 10238 characters of an earlier session's diary, FACTS block included. Nothing warned. The Write tool reported the file as updated rather than created, and `memory/` is gitignored, so version control held no copy; the only reason the diary came back is that the SQLite sessions table still held its `raw_markdown`. Step 7 of the skill now computes the filename immediately before writing it rather than at the start of the task, because a session runs for hours and another session can file a diary for the same project in between. The plain dated name is tried first, then `-2`, then `-3`. There is no `-1`, so the visible numbers match how many diaries exist. If the computed name exists the skill stops and reports rather than overwriting, appending, or guessing. The skill now also states that the SQLite row is the primary store and the markdown is a backup export, and says how to restore one from `raw_markdown`, because version control is not a fallback for a gitignored directory. A new Known Gotchas section names this incident first.
+- **A suffixed diary filename would have re-namespaced the facts, so the project is now passed explicitly.** Step 8 passes an explicit project flag to the ingest. Without it a name carrying a `-2` suffix derives the namespace `project-2`, which ingests cleanly, exits 0, and is invisible to every recall for the real project. Fixing the filename without this would have traded a destroyed diary for a silently misfiled one.
+- **The Stop gate blocked on a report that existed, because it scanned only the top level of the report directory.** It also deleted the marker on success, so acceptance was never recorded anywhere. Twice on 2026-09-06 a report was written correctly, filed into a reviewed subfolder while the session was still open, and the next Stop then found an empty top level and blocked. Both sessions wrote a duplicate of a report that had never gone missing. There are two layers now, because either alone leaves the observed case open. The marker records the accepted file's path, and a later Stop is answered from that record instead of from another scan, which covers a file moved after the gate has already seen it. When the recorded path is gone, the scan covers the report directory and one level of subdirectories, which covers the actual failure, where no Stop ran between the write and the move so there was nothing recorded to fall back on. One level and no further: the filing convention is one folder deep, and an unbounded walk is a Stop hook that hangs on a large report directory.
+- **The block message distinguishes never-written from written-and-moved.** A report that was never written asks for one. A report that was written and is now gone names the path that vanished and says to restore it, rather than leaving the session to write a duplicate of a report it already delivered.
+
+### Notes
+- **PATCH.** No skill is added, removed, renamed, or recategorized. The skill count is unchanged at 87 free and 131 total, backed by the load gate receipt at `.memstack/receipts/plugin-load-20260907T115427Z.json`, which reports 87 `SKILL.md` on disk, 87 registered by the real loader, and zero frontmatter warnings.
+- **Neither skill's frontmatter description changed in this cycle,** so the generated catalogs carry no new wording and were not regenerated.
+- **Selftest coverage grew with both fixes.** `scripts/verify.py` gained `diary_markdown_name` and `free_diary_path`, driven by a case that writes three diaries for one project on one day in a real directory and reads the first file's bytes back after each later write to prove they are unchanged. The report gate gained three cases, and the case covering a successful Stop now asserts that the marker records the accepted path rather than being deleted. The suite stands at 32 cases.
+
+## v3.9.10 - 2026-09-05 - The report requirement becomes standing
+
+### Added
+- **Standing report triggers, both unset by default.** The report requirement armed on one literal phrase, so every prompt that wanted a report had to carry it. Two environment variables now add standing prefix triggers on top of the phrase. `MEMSTACK_REPORT_ON_TASK_PROMPTS` set to `1` arms any prompt whose first non-blank line starts with `Working directory:`, which is the shape a dispatched task prompt has. `MEMSTACK_REPORT_TRIGGERS` adds any other prefixes, semicolon separated, each matched against the same first non-blank line. Neither is set on a shipped install, so a default install still arms on the phrase alone and behaves exactly as it did in 3.9.9. `Working directory:` is separated out from the general list rather than left in it because arming on that prefix by default would file a report for a large share of every prompt anyone writes, which is a decision that belongs to the machine and not to the package.
+- **A one sentence standing instruction at session start, and only when a trigger is configured.** `hooks/session-start` appends a single sentence to `additionalContext` saying that prompts beginning with a configured trigger require a session report and that the Stop gate enforces it. It is guarded on the two variables above, so a default install is told nothing and pays nothing. A prompt carrying the phrase announces the requirement itself, which is why there is nothing for a line to add there. It is one sentence rather than a block because it is charged to every prompt of every session it appears in.
+- **The marker carries the prompt, and the block message names it.** The marker records the prompt's first 80 characters with whitespace collapsed, plus which trigger matched. The Stop gate's block message ends with `The prompt was: ...`, so a session holding several task prompts is told which one is still owed a report rather than being told that a report is owed and left to work out which. A later matching prompt overwrites the marker, which is what re-arms the requirement: a session given three task prompts owes three reports, and the third marker carries a later request time than the file the second one produced, so an earlier report cannot satisfy a later request.
+
+### Fixed
+- **The expected prefix followed the wrong directory, and one request produced two files.** The report file is named for the leaf of the working directory the session was told to work in. The marker's expected prefix was derived from the leaf of the directory the session was launched from. Those are the same folder most of the time and silently different the moment a session opened in one repository is pointed at another, and when they differ the session writes a correctly named report that the gate cannot recognise, blocks, and writes a second file under the other name. Both halves now read a `Working directory:` first line and take that path's leaf, falling back to the launch directory when the prompt names none. The fix is independent of which trigger armed, because the mismatch is caused by the prompt naming a directory and not by how the prompt was recognised.
+- **The length floor applies to prefix triggers only.** A prompt under 40 characters does not arm a prefix trigger, because a standing prefix fires on "yes" and "commit" as readily as on a task and a report about "commit" is noise filed under a real project name. The floor was first written to apply to every trigger, which stopped a prompt consisting of nothing but the phrase from arming. That was wrong. The phrase is explicit intent, no one-word answer can contain it, and the case the floor guards against is therefore not a case the phrase can reach. A prompt carrying the phrase now arms at any length.
+- **The `report` skill's own description no longer describes only half of when it fires.** It said the skill fires on the phrase and is dormant otherwise, which stopped being complete the moment a standing trigger could arm it. It now states both paths and names the two variables.
+
+### Notes
+- **PATCH.** No skill is added, removed, renamed, or recategorized. The skill count is unchanged at 87 free and 131 total, backed by the load gate receipt at `.memstack/receipts/plugin-load-20260906T025448Z.json`, which reports 87 `SKILL.md` on disk, 87 registered by the real loader, and zero frontmatter warnings.
+- **The customer-facing catalog row for `report` is unchanged and still carries the 3.9.9 wording.** The `what` column in `SKILL-REFERENCE.md` and the README skills regions is generated from `scripts/_generated/skill_descriptions.json`, which is vendored from the loader repository and not from `SKILL.md` frontmatter. Correcting it is a one line edit in `memstack-skill-loader/src/memstack_skill_loader/skill_descriptions.json` followed by `npm run vendor:skills` and `npm run gen:catalogs`, and it is not in this release. Editing the vendored copy directly would be reverted by the next vendor run.
+
+## v3.9.9 - 2026-09-05 - The session says what it did, in a file
+
+### Added
+- **A `report` skill, and a gate that makes it stick.** The skill writes the session final report to a file when a prompt asks for it, then prints only the path and a one line summary. It is dormant unless the prompt carries the exact phrase, because the word "report" appears in ordinary prose constantly and a skill that fires on the word would fire on almost every session. The file lands outside the working tree, is written with the Write tool and never through a shell redirection, carries no secret values, and ends with the session approximate context usage so a reader can tell whether to continue here or start fresh.
+- **The report is enforced rather than requested.** A `UserPromptSubmit` hook records the request in `.memstack/report-required.json` at the repository root, holding the session id, the request time, and the expected file name prefix. The Stop gate in `scripts/verify.py` reads that marker and blocks until a file carrying the prefix exists with an mtime after the request, then deletes the marker. Without a marker it does nothing at all, so a session nobody asked for a report from is never gated for one. The expected prefix is computed when the request is recorded and not at Stop time, because the local date can roll over mid session and the file owed is the one named for the day the request was made.
+- **The skill count is now 87 free and 131 total.** The `report` skill is the eighty-seventh free skill and is filed under Core, which grows from 16 to 17. The Pro count is unchanged at 44. The propagation is complete across all three repositories: `memstack-skill-loader` re-exported `skills.public.json` at 131 entries, and this repository's generated catalogs, the README skills regions and `SKILL-REFERENCE.md`, now carry 131 with a `report` row. The manifest gate and the plugin load gate both report 87 `SKILL.md` files on disk and 87 registered by the real loader, with zero frontmatter warnings.
+- **A plugin load release gate, `npm run check:plugin-load`.** It runs the real loader and asserts on what the loader reports rather than on what the tree contains: the count of `SKILL.md` files on disk, the count the loader registers, and zero frontmatter warnings. `RELEASING.md` makes it step 1, before any version surface moves. It observes what the loader registers rather than what the Skill tool offers, and those numbers differed by one in 3.9.8, so the gate closes the silent frontmatter drop and not the whole gap.
+
+### Fixed
+- **The Stop hook timeout was set in the wrong unit and meant roughly four hours.** `hooks/hooks.json` carried `"timeout": 15000` on the `verify-gate` entry, written as if the field were milliseconds. The hooks reference states the unit plainly: "Seconds before canceling." At 15000 seconds the gate had a budget of about four hours and sixteen minutes, so a hung gate would have hung the Stop event rather than being cancelled. The value is now `15`, which is the ceiling that was intended all along. Nothing else about the entry changed, and the gate itself was never slow: the bug was in what would happen if it ever were.
+- **Report file names carry a time instead of a sequence number.** The name becomes `<project>-<YYYY-MM-DD>-<HHMMSS>.txt`, the six digit local wall clock read at the moment of writing. The sequence number it replaces had to be derived from the directory listing, and that derivation is what failed in practice: reviewed reports are filed into a subfolder, the live directory empties out, and the count restarts at `01` on top of a name that is still in use one level down. That produced a duplicate `01` and a hand made `01c` against twelve delivered reports in a single day. A clock reading has no state to lose, and two sessions in one project cannot collide on a second. The gate needs no change for this: its expected prefix is `<project>-<date>-` and stops there, so it never saw the suffix in the first place.
+
+## v3.9.8 - 2026-09-04 - The manifest fix that actually registers the skills
+
+### Fixed
+- **3.9.7 claimed all 86 free skills register, and they did not.** The manifest nested the skills array inside a `components` object. `components` is not a field in the plugin manifest schema, Claude Code never reads it, and it is discarded without a warning, so the ten directory entries 3.9.7 added were correct and unreachable at the same time. The loader fell back to the default `skills/` root and registered the same 18 core skills that every release before it registered. The 3.9.7 entry below describes a fix that was written correctly and wired to nothing. `docs/DELIVERY.md` had already recorded `components` as dead config, in the same repo, before the release that depended on it.
+- **The skills array is now a top-level key of `plugin.json`.** Same ten entries, same order, same `./` prefixes: the `skills/` root plus the nine category directories. Nothing else about the declaration changed, because nothing else about it was wrong.
+- **One skill was registered by the loader and still never offered.** `skills/development/code-reviewer/SKILL.md` carried a backslash-escaped apostrophe inside its double-quoted YAML description. That is not a valid escape sequence in a YAML double-quoted scalar, and an apostrophe needs no escaping there at all, so a strict parser rejects the block at line 3, column 147, with "found unknown escape character". Claude Code parses frontmatter strictly and drops the individual skill without failing the plugin load, so the failure was silent and cost exactly one skill. The backslash is removed and the description text is unchanged. This was not introduced by the 3.9.3 dash sweep: that commit touched only the `license` line of this file, and the description line passed through it as unmodified context.
+- **The counts in this entry were measured in a fresh session before it was written, not inferred.** With the ten entries at the top level the debug log records `skillsPaths=9 paths`, the tenth entry being consumed as the default `skillsPath`, and one `Loaded N skills` line per path summing to 86. The Skill tool offered 85 of those 86; the missing one was `code-reviewer`, whose frontmatter had not yet been repaired. With both fixes in place the number is 86 loaded and 86 offered.
+
+### Added
+- **`check-manifest-skills.mjs` now asserts the manifest shape.** It fails if `plugin.json` carries a `components` key, and fails if `skills` is not a top-level array. Either assertion alone would have caught 3.9.7 before it shipped. Run against the pre-fix tree the check reports both, exits 1, and says plainly that the exact-set, coverage and dead-entry assertions did not run because the declared directory set could not be read, rather than naming all 86 skills as unregistered and burying the one root cause.
+- **The same check parses every `SKILL.md` frontmatter block with a strict YAML parser and fails on any error, naming the file, the line and the column.** Node's standard library has no YAML parser, and an approximate reader written in Node would reproduce this class of bug rather than catch it, so the assertion delegates to Python and PyYAML through `scripts/_check-frontmatter-yaml.py`. It is invoked with an argument array and never through a shell, and the file list travels on stdin rather than argv. If no strict parser can be reached the assertion fails rather than skipping: a parser check that passes when it could not run is worse than no check at all.
+
+### Notes
+- **PATCH, not MINOR.** No skill is added, removed, renamed, or recategorized, and no new capability ships. What changes is that the 3.9.7 fix takes effect and one silently dropped skill is restored.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.7 - 2026-09-04 - All 86 free skills register, not 18
+
+### Fixed
+- **68 of the 86 free skills were delivered to every install and never registered.** `plugin.json` declared its skills as a single directory, `skills/`, and Claude Code scans a declared skills directory exactly one level deep: it looks for `SKILL.md` in that directory and in each immediate subdirectory, then stops. The 18 core skills sit at `skills/<name>/SKILL.md` and were found. The other 68 sit one level further down at `skills/<category>/<name>/SKILL.md` and were not. A free-tier install therefore reached 18 skills out of the 86 it had on disk, against a manifest advertising 130. Every categorized skill was affected: all of security, deployment, development, business, content, marketing, product, automation and SEO.
+- **This was never a delivery failure, which is why nothing caught it.** All 86 `SKILL.md` files were cloned, unpacked, and present in the plugin cache the whole time, at full size, in the right places. They were simply never indexed, so they could not be invoked by name, did not appear in autocomplete, and were never offered to the model. Any check that asked whether the files shipped would have passed. Nothing asked whether they were reachable, and those are different questions.
+- **The manifest now declares all ten directories that hold skills**: the `skills/` root plus the nine category directories (`automation`, `business`, `content`, `deployment`, `development`, `marketing`, `product`, `security`, `seo-geo`). Every path now carries the `./` prefix the plugin reference requires, which the old single entry did not. All 86 skills register.
+
+### Added
+- **`scripts/check-manifest-skills.mjs`, a manifest coverage check, wired into `npm run check:catalogs`** and available on its own as `npm run check:manifest`. It derives the required directory set from the filesystem rather than from any written-down list, and fails if a `SKILL.md` under `skills/` sits in a directory the manifest does not declare, if a declared directory registers nothing, if a declared path is missing the `./` prefix, or if a `SKILL.md` is nested too deep for any directory declaration to reach. Run against the 3.9.6 manifest it reports 18 of 86 registered and exits 1, which is the defect above, stated by the tooling instead of by a person.
+- **The same check asserts that all 86 frontmatter names are distinct.** Registered skills flatten into a single `memstack:<name>` namespace whatever directory they came from, so two skills sharing a name would collide. They do not: 86 files, 86 names, zero collisions. That property could not have been observed before, because 68 of those names were never registered and so could never have collided in the first place.
+
+### Notes
+- **The 68 newly registered skills carry their category prefix in their invocation name.** This follows the existing frontmatter convention recorded in `ADDING-SKILLS.md` Step 2: `skills/security/rls-checker/SKILL.md` declares `name: memstack-security-rls-checker`, and Claude Code takes the invocation name from that field, so it registers as `memstack:memstack-security-rls-checker`. The doubled prefix is redundant but harmless, and it is what makes these skills reachable at all. Renaming 68 skills touches the loader's category source, the free/Pro gate keying, and every generated catalog, so it is left to a deliberate change rather than folded into a fix.
+- **PATCH, not MINOR.** No skill is added, removed, renamed, or recategorized, and no new capability ships. What changes is that skills already written, already shipped, and already on the customer's disk become reachable.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.6 - 2026-09-03 - A personal webhook leaves the product, and SessionStart gets one owner
+
+### Removed
+- **The DevLog webhook script and the Stop hook that pinged it are gone from the tree.** `scripts/devlog-webhook.js` posted a saved diary to a private blog queue, and `.claude/hooks/session-end.sh`, whose entire body was the ping, posted a session-completed notice to the same endpoint on every Stop. Both were a personal automation belonging to one maintainer's machine and should never have shipped. Both were in the tracked tree, and the marketplace path is a git clone rather than an npm publish, so the `files` allowlist in `package.json` never gated them: every customer install of 3.9.5 carried all three copies of the pipeline. The `Stop` registration in `.claude/settings.json` is removed with the script, and the SessionStart ping in `.claude/hooks/session-start.sh` is removed with it. Nothing fires unless a user sets `MEMSTACK_DEVLOG_WEBHOOK`, and nothing in the tree can fire it now regardless.
+- **The webhook was opt-in, and that was never the point.** It was gated behind an environment variable and sent nothing when unset, which is why it survived the 2026-07-07 remediation. What it still did was ship a private publication pipeline as product code, aimed at an endpoint no customer owns, wired into two lifecycle events by default. The removal is about what belongs in the tree, not about whether the gate held.
+
+### Changed
+- **The repo-local SessionStart hook no longer injects any context, and the plugin hook is the single source.** `.claude/hooks/session-start.sh` and `hooks/session-start` were both registered and both emitted an `additionalContext` payload. Their skill-loader blocks were byte identical, 1,370 bytes each, so that block was delivered to every session twice, and each hook added its own project-detection line stating the same fact in different words. The measured duplication was 1,462 bytes per session out of a combined 9,744. The plugin hook is the copy that also carries the secrets policy, the living-memory recall block, the update-staleness advisory and the `core.hooksPath` check, so the repo-local copy is the one that stopped emitting. It now writes nothing to stdout at all.
+- **The repo-local hook keeps the two jobs the plugin hook does not do**: indexing `CLAUDE.md` into the `project_context` table, and printing the Pro nudge on stderr. Its header records the date and the reason, so the next reader does not restore the duplicate injection on the assumption that it was lost by accident.
+
+### Fixed
+- **Two skill counts were stale in shipped text.** The plugin hook advertised "100+ professional skills" and now says 130, matching `plugin.json` and the README. The repo-local hook's Pro nudge offered "29 additional skills" and now says 44, which is the actual Pro-exclusive count behind the 130 total (86 free + 44 Pro).
+- **`setup.py` is now a Python marker in the plugin hook.** It already was one in the repo-local hook, so a project carrying only `setup.py` was detected as Python by the hook that has stopped emitting and not detected at all by the hook that still does. Such a project now reports Python rather than dropping the project line entirely.
+- **Two documentation lines pointed at things that no longer exist.** `README.md` listed "Diary webhook: Session logs auto-POST to n8n webhook for devlog automation" as a Key Feature of the product, which it never should have been; that line is removed. `config.json` carried a `_note` describing the same webhook as opt-in, also removed. The `skills/echo` and `skills/work` input sections both located the store at `$MEMSTACK_PATH/db\memstack.db`, a beside-the-script path that 3.9.5 replaced; both now read `~/.memstack/memstack.db`.
+
+### Notes
+- **The disclosure history in this file is unchanged on purpose.** The 2026-07-07 security entry and the 2026-03-01 entry that introduced the webhook both stay exactly as written. They are the record of what happened, and a removal is not a reason to edit them.
+- **PATCH, not MINOR.** Files are removed and a hook stops emitting, but no capability a customer relied on changes: the context those customers received is still injected, once instead of twice, by the plugin hook.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.5 - 2026-09-03 - The diary session store lives in the user's home
+
+### Fixed
+- **Diary sessions were being written beside whichever copy of the script happened to run.** `db/memstack-db.py` resolved its store as `Path(__file__).parent / "memstack.db"`, making the database a sibling of the script file rather than a property of the user. Ten copies of that script exist on a working machine: this repo, the marketplace checkout, and one directory per cached plugin version. Whichever copy a session invoked created and wrote its own database, and `get_db()` schema-initialises any absent file, so a save into a fresh location returned an ok result and a row id instead of failing in a way anyone would notice. Two plugin-cache copies each hold exactly one session recorded this way, one dated 2026-09-02 and one dated 2026-09-03, and neither reached the canonical store.
+- **A plugin update discards the cache directory, and with it any session recorded inside one.** `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` is replaced version by version, so a diary written into a cached copy of the store is removed by the next update with nothing reporting the loss. Six of the ten script copies on this machine have no database beside them, which is consistent either with no save ever running from them or with an update having removed one; the two that do carry a database are cached versions that have not yet been superseded.
+- **The store is now `~/.memstack/memstack.db`, one file per user.** `MEMSTACK_SESSION_DB` overrides it. That is a new variable name on purpose: `MEMSTACK_DB_PATH` already names the skill-loader's `memory.db` and is read by `bridge_to_loader()` to decide whether the insight bridge is safe to run, so reusing it would have tied two unrelated redirections together.
+- **An existing script-relative store is adopted once, by copy.** On the first run where the home store is absent and a `memstack.db` sits beside the running copy, that database is copied to the home path through SQLite's own backup API, which carries across committed transactions still held in a WAL sidecar that a plain file copy would leave behind. The source is left exactly where it is, so rolling back to an earlier plugin version still finds its data. The copy is skipped whenever the destination already exists, which is both what makes it happen exactly once and what stops it from ever overwriting a live store.
+- **Every command now prints the store path it used on stderr**, as `memstack-db: store <path>`. The defect survived as long as it did because a save into the wrong database reported success and an id while saying nothing about where it had written.
+
+### Added
+- **`import-sessions <path>` merges another `memstack.db` into the store.** It carries `sessions`, `insights`, `project_context` and `plans`, inserts every row with a fresh id so that two stores whose sequences both begin at 1 merge without collision, and skips rows already present. Sessions and insights are matched on `created_at` plus project plus body, `project_context` on project, and `plans` on project plus task number, following the uniqueness the schema already declares. It prints imported and skipped counts per table, opens the source read-only, and never moves or deletes it, so a second run is a no-op rather than a duplication.
+
+### Notes
+- **Twelve tests were added**, covering the home default, the override, the fact that `MEMSTACK_DB_PATH` does not redirect this store, the adoption copying rather than moving, the adoption happening exactly once, the adoption never overwriting an existing home store, the stderr path line, and `import-sessions` importing and then skipping on a re-run. None of them touch the real store: each sets `MEMSTACK_SESSION_DB` to a temporary path first, and the one test that asserts the real default performs no IO. The suite is 29 cases, from 17.
+- **`$MEMSTACK_PATH` is gone from every `memstack-db.py` invocation in the skills.** It was never a defined variable, not in the environment and not anywhere in this repo, so each invocation depended on an agent substituting a path by hand, which is how a plugin-cache copy came to be run at all. Those sixteen invocations across `diary`, `echo`, `project`, `quill` and `work` now use `${CLAUDE_PLUGIN_ROOT}`, which Claude Code defines. The remaining `$MEMSTACK_PATH` references name other things (a skill script, a document, a directory) and are left for a separate decision.
+- **PATCH, not MINOR.** A command is added, but the tool does the same job it did before; what changes is where its data lives.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.4 - 2026-09-03 - The tree fingerprint no longer depends on when it is taken
+
+### Fixed
+- **`tree_fingerprint` could return the HEAD tree instead of the working tree, and which one you got depended on the wall clock.** The cause is one line: the temp index was copied with `shutil.copyfile`, which writes the copy with a fresh mtime instead of the original's. Git decides whether to trust an index entry's cached stat data with its racy-clean rule, trusting any entry older than the index file itself and re-reading from disk any entry that is not, so a freshly stamped copy makes every entry look trusted; a tracked file edited within the same second as the last index write, to content of the same byte length, then still matches on the fields git compares, and `git write-tree` serialises its committed content rather than what is on disk. The copy is now made with `shutil.copy2`, which carries the original mtime across, and the copy's `st_mtime_ns` is compared against the original's afterwards and set explicitly with `os.utime` on any filesystem that truncates it. A receipt written before this release could therefore record the HEAD tree for a same-second, same-length edit, describing content that was never verified.
+- **The selftest is no longer intermittent.** The same defect made `gate-allows-matching-pass-receipt` fail at random: the case wrote a receipt carrying one fingerprint and the gate then computed another for the same untouched tree. A 200 iteration probe of that single case measured 33 blocks, and a further 33 runs that passed only because both computations were wrong in the same direction and agreed. The same probe against the fixed function measures 0 blocks and 0 wrong fingerprints in 200 iterations, with all three computations per iteration identical.
+
+### Notes
+- **The selftest grew from 16 cases to 17.** The new case, `same-second-edit-fingerprints-consistently`, arms the trap rather than waiting for it: it commits a file, overwrites it with different content of the same byte length inside the same wall-clock second, asserts that the edit really did land in the index's own second, and then takes 50 fingerprints spread across several second boundaries. All 50 must be equal, and must equal a fingerprint taken from the repository's real index after a genuine `git add -u`, which is an oracle independent of the copy logic under test. Its control puts the bug back in place for a second fixture, reverting `copy2` to `copyfile` and neutralising the `os.utime` correction, and the case reports the control as not demonstrated rather than passing if that reverted path fails to produce a stale value. It currently reports 50 of 50 stale under the reverted fix and 1 distinct fingerprint in 50 under the fix. If the trap cannot be armed on a given machine, the case says so and fails rather than reporting a green it did not earn. The deliberate-FAIL demonstration remains the first case.
+- **PATCH, not MINOR.** One line of copy behaviour and one new selftest case. Nothing is added to what the tool does.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.3 - 2026-09-03 - No em or en dashes anywhere in the repo
+
+### Changed
+- **Every em dash and en dash is gone from every tracked file.** The sweep removed 2,432 dash characters, 2,404 em and 28 en, from 128 of the 167 tracked files, with 2,161 of the em dashes under `skills/`. The replacements were made by rule, not by hand: a structural label form (a bullet or heading label followed by a dash) became a colon, a table cell holding only a dash became "none", a numeric range became "A to B", a paired dash forming a parenthetical became parentheses or commas depending on the length of the enclosed span, and a remaining single dash in prose became a comma by default, a colon where the right side is a list or a label of four words or fewer, and a period where both sides are independent sentences of eight words or more. 2,421 of the 2,432 were replaced that way; the remaining 11 were replaced by hand as explicit pairs: two unspaced (one used as a legend symbol among stars and crosses, one the generator emitted as an empty table cell), one starting a line and continuing the line above, two ending a line where both sides were independent sentences, four forming two parentheticals that spanned two lines, and two the period rule claimed but review rejected. A further 15 lines whose rule output read badly in source files were corrected by hand the same way. Fenced code blocks and frontmatter descriptions were in scope; the house rule has no code exception. Every file's line endings were preserved exactly.
+- **`scripts/generate-catalogs.mjs` now emits the same punctuation the swept documents carry.** The generator writes the README catalog regions and the whole of `SKILL-REFERENCE.md`, and it held dashes of its own, including one emitted as an empty table cell. Sweeping the documents and the generator separately would have left the two disagreeing, so the generator's output strings were aligned to the documents. That also clears a README catalog drift that predated this release.
+
+## v3.9.2 - 2026-09-03 - A commit of verified content keeps its receipt
+
+### Fixed
+- **Committing content that was already verified no longer invalidates its receipt.** The tree fingerprint was a hash of HEAD plus every porcelain status line, so it described where content sat as much as what that content was, and a commit changed both halves at once: HEAD moved and the status lines emptied. A receipt earned seconds earlier stopped matching, and the gate blocked a session whose code nothing had touched since it passed. The fingerprint is now the git tree object for the working tree's tracked content, taken by copying the index, running `git add -u` against the copy, and hashing what `git write-tree` returns. Two trees holding the same tracked content fingerprint identically regardless of which commit they sit on, so moving verified content into a commit leaves its receipt valid. Any edit to a tracked file, staged or not, still changes the content and still moves the fingerprint, so a stale receipt still cannot clear new work.
+- **The block message no longer claims tracked changes exist.** It read "Unverified tracked changes exist", which was false in exactly the case that most often produced it: after a commit the tree is clean and there are no tracked changes at all, only a receipt that no longer matches. It now reads "No PASS receipt matches this tree state", which is the condition the gate actually tests.
+
+### Changed
+- **Receipts carry a `fingerprint_kind` field, and the gate requires it to read `tree`.** A receipt written before 3.9.2 holds a fingerprint of the older kind, in the same field, with the same shape and length. Comparing across the two schemes could only ever match by accident, and an accidental match would clear the gate on work that nothing had verified. Receipts written before 3.9.2 therefore no longer clear the gate. One `python scripts/verify.py run` refreshes them, which is what the gate's message already tells you to do.
+
+### Notes
+- **Untracked files are still excluded, and now inherently rather than by a filter.** `git write-tree` serialises the index, and `git add -u` only ever updates paths git already tracks, so a path git has never heard of is in neither. There is no rule left here that could be forgotten or mis-scoped.
+- **The repository's own index is never touched.** The fingerprint runs against a copy, located with `git rev-parse --git-path index` and named to git through `GIT_INDEX_FILE`, and that copy is deleted on every path including failure. Every failure still returns nothing at all rather than a wrong answer: git absent, not a repository, unmerged entries that write-tree refuses to serialise, or no temp directory available.
+- **The selftest grew from 13 cases to 16**, and each new case asserts a control before its result is allowed to count. A commit of identical content leaves the fingerprint equal, with the control that the edit before it moved the fingerprint. A staged new file moves the fingerprint, with the control that the same file left untracked does not. A PASS run receipt without `fingerprint_kind` fails to clear an armed gate, with the control that the identical receipt carrying the key clears it. The deliberate-FAIL demonstration remains the first case.
+- **PATCH, not MINOR.** The receipt gains a field and the gate gains a condition, but nothing is added to what the tool does, and an install that has run verify once since upgrading behaves as it did before.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.1 - 2026-09-03 - The hook wrapper's line endings are pinned, and bash can read them
+
+### Fixed
+- **`hooks/run-hook.cmd` no longer leaves its own line endings to whatever git configuration a client happens to have.** The file is a cmd.exe and bash polyglot, and its batch half needs CRLF: cmd.exe label parsing for the `goto verify_gate` jump is unreliable in a file with bare LF endings, and that jump is how the Stop gate is reached on Windows. Nothing pinned those bytes. The repository carried no `.gitattributes`, so every checkout decided the question locally from `core.autocrlf`, and a Windows install where that setting is not `true` received LF bytes for a file whose batch half depends on CRLF. `.gitattributes` now declares `hooks/run-hook.cmd text eol=crlf`, so a checkout on any platform produces the bytes the batch half needs instead of the bytes that machine's configuration happens to prefer.
+- **The Unix half now re-executes a CR-stripped copy of itself, which is what makes that pin safe for bash.** bash does not strip carriage returns the way MSYS bash on Windows does, so a CRLF polyglot fails hard on Linux and macOS: the heredoc terminator still matches and the batch half is still skipped correctly, but the shell then reads `shift` with a trailing CR as a command name, cannot find it, and runs off the end of the file with a syntax error. That exits 2, and 2 is the single code a Stop hook uses to mean blocked, so the failure would have presented itself as a verification block rather than as the broken wrapper it is. A single guarded line now hands bash a copy of the file with the CR bytes removed. `MEMSTACK_CR_STRIPPED` in the environment stops it recursing, so the re-execution happens exactly once, and `$0` and the arguments survive it.
+
+### Notes
+- **PATCH, not MINOR. Nothing is added, and a working install behaves identically.** Both halves of the wrapper keep the contract 3.9.0 gave them: the Stop gate still exits 0 for every condition the wrapper itself cannot resolve, and exit 2 still belongs to `scripts/verify.py` alone.
+- **3.9.0 did not block Stop on Linux or macOS.** git normalized the wrapper to LF in the index, and with no `.gitattributes` a non-Windows checkout received those LF bytes, which bash reads correctly. This was confirmed by running the 3.9.0 bytes on Ubuntu under bash 5.2.21 before the fix was written: exit 0, empty stderr, valid session-start JSON. The defect this release closes is that the bytes were never pinned at all, and the re-execution is what makes pinning them safe to do.
+- **Proved on a real Linux bash rather than on Windows alone.** Under bash 5.2.21 with the CRLF wrapper in place: `run-hook.cmd session-start` exits 0 with empty stderr, both when invoked through bash and when executed directly; the Stop gate exits 0 and silent with no arming marker present, and also with `CLAUDE_PLUGIN_ROOT` unset; and in a repository with the marker present it exits 2 and reports the block, quoting the session id from the payload piped into it, which is what proves stdin reaches `verify.py` through the wrapper untouched. The same CRLF file without the fix exits 2 with a syntax error on the same machine.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+
+## v3.9.0 - 2026-09-03 - Verification writes a receipt, and a gate reads it
+
+### Added
+- **A verification CLI, `scripts/verify.py`, that runs the project's own check chain and writes a receipt saying what happened.** The receipt records the detected chain, each check's outcome, the git head, and a fingerprint of the working tree, so a later reader can tell whether the receipt still describes the code in front of them. It is evidence rather than a claim: a run that could not execute a check says so instead of reporting a pass.
+- **A Stop gate that reads those receipts and blocks a session that is ending with unverified tracked changes.** It ships through `hooks/run-hook.cmd verify-gate`, registered as a `Stop` hook in `hooks/hooks.json` with a 15 second timeout. Exit code 2 is the only code that means blocked and it belongs to `verify.py` alone; every condition the wrapper itself cannot resolve exits 0.
+- **The gate is inert until you arm it.** It never blocks unless a `.verify-required` file exists at the repo root of the working copy it is running in. Installing this release therefore changes nothing about how your sessions end. `.verify-required` is gitignored on purpose: committed into a shipping tree it would arm every clone of that repo.
+- **`skills/verify` is rewritten to 2.0.0** to drive the CLI rather than describe verification in prose. It runs the chain, reads the receipt, and reports what the receipt says. It stays dormant in repositories with no detectable check chain, during read-only audits, and for edits that leave no tracked change behind.
+- **Session start now reports a `core.hooksPath` that points at a directory which does not exist.** That setting silently disables every git hook in the repo: git finds nothing to run and reports success, so a pre-commit secrets gate or a commit-msg guard is absent while still looking configured. One line names the condition, quotes the configured path, and says git is running no hooks for that repo. Nothing else fires it. Unset, empty, and a path that resolves to a real directory all stay silent, as do a machine with no git and a working directory that is not a repository.
+- **The diary skill documents what ingest actually summarizes**, so the boundary between what is stored and what is derived is readable from the skill instead of inferred from behavior.
+
+### Fixed
+- **A receipt's `dirty` flag now means what the fingerprint means.** It previously disagreed with the tree fingerprint about untracked files, so a receipt could read clean while the fingerprint had already moved. Untracked files are now counted separately in `untracked_count` and the two agree by construction.
+- **The interpreter probe runs python instead of asking where python is.** On Windows the Store stub satisfies a path lookup and then exits 9009 without executing anything, so a lookup proved nothing. The probe now executes a trivial import, and both invocations go through `call`, because a python that is a `.cmd` or `.bat` shim would otherwise take control and never hand it back: the shim's exit code would become the hook's, and the lines after it would never run.
+- **The receipt directory ignores itself.** `.memstack/` is gitignored, which also keeps generated receipts from riding a broad `git add` into the shipping tree.
+
+### Notes
+- **MINOR, not PATCH.** This adds two customer-facing mechanisms that did not exist before, the verification CLI and the Stop gate, and rewrites a skill to a new major.
+- **Nothing here blocks you by default.** The gate is disarmed unless `.verify-required` is present, and the `core.hooksPath` line is advisory context, not enforcement.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+- **The version bump is the delivery step, not bookkeeping.** Clients cache the plugin by its version string and re-pull only when that string differs, so none of this reaches an existing customer until 3.9.0 is on `master`.
+
+## v3.8.0 - 2026-08-26 - The session now tells you a release exists
+
+### Added
+- **This release adds the mechanism that tells you about future releases, which means it is the last one you have to find on your own.** Until now nothing in MemStack told a customer that a new version existed. The only automatic channel is the Pro bundle probe, and it carries Pro skills and structurally cannot carry hooks or free skills, so a customer who never ran the update commands never received a hook fix or a free-skill fix. Not slowly. Never. The check that closes this ships inside the thing it reports on, so it can only start working for you once you install this release by hand.
+- **Session start now reports when the installed plugin is behind the marketplace.** The report goes into the session context and the model relays it at a natural moment, with the exact commands to run and the reminder that a restart is required. It names both the installed and the available version, so the size of the gap is visible rather than implied.
+- **It also detects the half-updated state**, where `/plugin marketplace update` has run but `/plugin update` has not. That state is easy to miss because it looks like a working update: `find_skill` starts serving the new skills immediately while Claude Code keeps loading the old hooks and the old `/memstack:*` skills from the previous install. The check compares the two on disk, names the state, and asks only for the command that is actually missing.
+- **Bounded so it cannot cost you a session.** The hook is synchronous with session start, so the network probe runs at most once per day, is capped at three seconds, and is skipped entirely when a same-day answer is already on disk. The half-updated check reads two local files and touches the network never. Every failure path is silent: no network, no `curl`, a wrong answer, an unwritable stamp directory, all of them leave the session exactly as it would have been. A machine that is offline records the attempt and backs off for the full day rather than paying the timeout at every session start.
+- **Kill switch: `MEMSTACK_NO_UPDATE_CHECK=1`** disables the network probe. `MEMSTACK_PLUGIN_VERSION_TTL` overrides the once-a-day interval.
+
+### Fixed
+- **The machine-wide pre-commit guard is hardened against signal death.** Invoked through a pipe, the hook could be killed part way through writing its message, and git reports a signal-killed hook as success. The failure was silent in the worst direction: the commit proceeded as though the guard had passed, when in fact the guard never finished deciding.
+- **The verification harness now asserts that its probe actually staged.** It stages with force and then confirms the probe is present in the index, failing loudly when it is not. Previously an ignore rule could exclude the probe file, `git add` would decline it with the complaint discarded, and the run reported green with the guard never invoked once. A harness that cannot prove it armed its own probe cannot tell a pass from a thing it never tested.
+
+### Notes
+- **MINOR, not PATCH.** This adds a customer-facing mechanism that did not exist before, which this track sizes as a MINOR.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro)**, verified against the loader's `check_skill_drift.py`, which is the count authority.
+
+## v3.7.2 - 2026-08-20 - Four hook consumers that never ran now read their input from stdin
+
+### Fixed
+- **Every hook consumer shipped with this plugin gated on `CLAUDE_TOOL_INPUT`, an environment variable Claude Code does not provide.** All four expanded it to the empty string, so none of them ever ran, not once, on any customer machine. Three were registrations in `.claude/settings.json` that piped the empty variable to `grep` and took the failing branch every time: the pre-push gate (`pre-push.sh`), the pre-commit secrets gate (`pre-commit-secrets.sh`), and the post-commit check (`post-commit.sh`). The fourth, `post-tool-monitor.sh`, read `CLAUDE_TOOL_NAME` and `CLAUDE_TOOL_INPUT` directly.
+- **Both secret-scanning gates were among the four.** Anyone relying on this plugin had two staged-secret checks registered and neither had ever executed a single scan. Treat any commit made under 3.7.1 or earlier as unscanned by these hooks.
+- **Measured, not inferred.** 1053 observation entries written between 2026-06-02 and 2026-08-05 each recorded `unknown` as the tool name and `unknown call` as the summary, which are exactly the empty-variable defaults.
+- **The documented delivery mechanism is stdin.** Claude Code passes hook input as a single JSON document on the hook process stdin. `tool_name` is a top-level string and `tool_input` is the tool's own parameter object, so a Bash command is `tool_input.command`. No `CLAUDE_TOOL_INPUT` variable exists in any form, which was confirmed by capturing a live payload before anything was changed.
+- **A new dispatcher, `.claude/hooks/gate-on-command.sh`, now owns the three gated registrations.** It reads the payload, extracts `tool_input.command` with `python`, tests it against a literal substring passed as an argument, and runs the target script only on a match. The three target scripts are untouched and still take no arguments and read no stdin.
+- **`post-tool-monitor.sh` now parses the same payload directly**, keeping its existing summary logic, entry format, and 120 character clip. The observation files keep their shape and carry real tool names and real summaries in place of `unknown`.
+- **Failure posture is explicit rather than silent.** A gate that cannot parse its input exits 0 and blocks nothing, and the two secret gates announce the skipped run on stderr instead of passing quietly, because a silent no-op is the exact defect being repaired.
+- **No command text is written to the gate log.** A command can carry a credential, so only the matched pattern and the target script name are recorded.
+- **The pre-push gate's first live execution immediately exposed a second defect, in itself.** It scanned the entire working directory with `gitleaks detect --source . --no-git`, which reads gitignored files that never leave the machine, and it blocked this very release on six findings: five in local state that git ignores, and one in a table of PEM header strings inside the secrets-scanner skill's own documentation. It now scans the commits the push would actually deliver, using the upstream range where one exists and the tip commit where it does not, and the fallback regex path is scoped the same way. Its block reasons now go to stderr as well as stdout, because a caller stopped by exit 2 is handed stderr only and until now saw nothing at all explaining why.
+- **The repo's own commit-format rule instructed every session to add a `Co-Authored-By` trailer that the machine-wide `commit-msg` guard hard-blocks**, so a session that followed the rule had its commit refused. The instruction is removed from `.claude/rules/memstack.md` and from the rule summary in `MEMSTACK.md`, and the guard's behavior is stated in its place.
+
+### Notes
+- **Every gate was proven firing live before this release, not assumed repaired.** Each one was triggered by a real tool call and left evidence: the pre-push gate ran and blocked the call with exit 2, both `git commit` gates logged a match on a real commit, and `post-tool-monitor.sh` recorded a `Write` and a `Bash` entry with real values one minute after the previous entry still said `unknown`.
+- **PATCH, not MINOR.** This repairs registrations that already shipped and adds no customer-facing capability. The dispatcher is the repair itself, not a new mechanism.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+- **The version bump is the delivery step, not bookkeeping.** Clients cache the plugin by its version string and re-pull only when it differs, so none of this reaches an existing customer until 3.7.2 is on `master`.
+
+## v3.7.1 - 2026-08-20 - JSON payloads move to a stdin sentinel so a shell never parses them
+
+### Fixed
+- **All seven `memstack-db.py` call sites across four skills now pass their JSON payload on stdin** rather than as a single-quoted command-line argument. The sites are `add-session`, `add-insight`, and `set-context` in the diary skill; `set-context` in the project skill; `set-context` in the quill skill; and `add-plan-task` and `update-task` in the work skill. Each writes the payload to a file and pipes it in with the literal `-` argument.
+- **Why it mattered:** on Windows, `cmd.exe` does not treat single quotes as quoting characters. A redirection operator anywhere inside a quoted payload was therefore executed rather than passed through, silently creating a 0-byte file named after the token that followed it. Prose composed by a session routinely contains one, in an arrow or a comparison.
+- **Confirmed by evidence, not theorized:** a 0-byte file named `parses` appeared in `memory/sessions/`. Database row 689 holds the text `=> parses` while none of that diary's markdown files do, so the string reached the database by travelling on the command line, and the shell acted on the operator on the way past.
+- **`db/memstack-db.py` gained the sentinel** (commit `f5fa4b1`). The literal argument `-` makes `parse_json_arg` read the payload from stdin instead. It cannot collide with real input, because `-` is not valid JSON, so every argument that parsed before still parses unchanged.
+- **The diary skill's Protocol rule was rewritten to match.** It previously said to always use Bash because PowerShell mangles JSON arguments. That named the wrong mechanism and the wrong shell: the hazard is cmd.exe redirection rather than JSON mangling, and PowerShell, which does treat single quotes as quoting, is the shell that would have survived it. The rule now states what the examples below it actually do.
+
+### Notes
+- **PATCH, not MINOR:** instructions inside existing skills were corrected. No new skill and no new mechanism ships, which is how this track has sized a content fix before (3.5.5, 3.6.2).
+- **All seven sites moved, including the three that carry only metadata.** A rule with exceptions is a rule that gets applied wrongly, and the sentinel costs nothing on a small payload.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro).**
+- **The version bump is the delivery step, not bookkeeping.** Clients cache the plugin by its version string and re-pull only when that string differs, so none of these fixes reach an existing customer until 3.7.1 is on `master`.
+
+## v3.7.0 - 2026-08-03 - Secrets rule ships with every session; diary ingest docs corrected
+
+### Added
+- **A secrets output policy now ships in the SessionStart hook's `additionalContext`**, so it reaches every session without a customer pasting anything into their own CLAUDE.md. It states the rule directly: never print a secret's value (env var, credential, API key, token, password, or capability URL), inspect `.env` by names only, allowlist names rather than denylist value patterns, verify by property (length, fingerprint, boolean) instead of by printing, redact before running rather than after, and treat rotation as mandatory if a value escapes.
+- **This is guidance the assistant is instructed to follow, not an enforcement mechanism.** Nothing in the hook inspects, filters, or blocks a command or its output. It cannot prevent a secret from being printed; it only tells the assistant not to print one. Treat it as a standing instruction, not as a control, and do not let its presence substitute for redaction at the point where output is actually produced.
+- **Measured cost:** the hook's static `additionalContext` grows from **301 tokens to 501 tokens (+200)**, 1,372 to 2,249 characters, charged once per session at startup (cl100k_base; Claude's tokenizer will differ slightly).
+
+### Fixed
+- **The diary skill's FACTS ingest step no longer documents behavior the ingester stopped having.** It described the step as fire-and-forget, claimed it **always exits 0**, and said malformed lines are skipped with only a stderr note, which invited treating a silent run as a successful one. The ingester (on the loader's `master`, not yet in a published release, see Notes) prints an `N ingested, M duplicate, K skipped` summary on stdout with one indented reason per skipped line, and classifies the outcome by exit code: **0** nothing lost, **1** total loss (lines present, none ingested), **2** store failure (aborted at the first bad row). The step now instructs reading that summary, and re-running after fixing skipped lines, which is safe because facts dedupe on source + subject + claim. A non-zero exit still never means the diary failed to save; the markdown and SQLite row are already written by then.
+
+### Notes
+- **MINOR, not patch:** a new always-loaded block shipping to every session is a new mechanism, and this track versions a new mechanism as MINOR (3.4.0, 3.5.0, 3.6.0). A content fix inside an existing skill stays a PATCH (3.5.5, 3.6.2).
+- This content was briefly published as **3.6.3** (commit `101b14f`) before the version was re-cut as 3.7.0. The two are byte-identical in content; 3.6.3 is superseded and carries nothing 3.7.0 lacks. Anyone who updated in that window is not missing anything, but should update again so the cached version string matches.
+- **No skill added, removed, or renamed, and the skill count is unchanged at 130 (86 free + 44 Pro)**, verified against the loader's `check_skill_drift.py`, which is the count authority.
+- **The corrected exit-code behavior is not in a published loader yet.** It is committed on the loader's `master` (`555e707`) but sits in that repo's `## Unreleased` section: the `v4.15.1` tag points at `6c0ef7b`, five commits earlier, and **4.15.1 is still the newest version on PyPI**. No published release contains it.
+- **This means the diary skill's step 8 documents behavior an installed loader does not have.** On 4.15.1 the ingester prints no summary and exits 0 on every path. A user who follows the corrected doc, sees no `N ingested, M duplicate, K skipped` line, and concludes their install is broken is a likely outcome, not an edge case. The doc is accurate about where the ingester is going, not about today; it becomes true when the loader cuts its next release. Until then a silent ingest on 4.15.1 is normal, not a fault.
+
+## v3.6.2 - 2026-08-02 - Ship the stranded secrets-scanner guidance
+
+### Fixed
+- **Customers on 3.6.1 were running a secrets-scanner skill that reads as a working control, without the section stating it is not one.** The 106-line block (committed `1d956de`, 2026-07-31) that opens with "Enforcement lives in CLAUDE.md, not here" plus the safe-inspection how-to (allowlist-names redaction, verify-without-revealing via length / character class / sha256 fingerprint, atomic byte-mode `.env` editing, capability-URL handling) landed on `master` under the static 3.6.1 version string. Clients cache the plugin by version string and never re-pull under a static version, so it reached no one. This release bumps the version, which is the only thing that makes the marketplace serve content that was already sitting on `master`.
+- **The diary skill no longer emits em dashes** into published diary bodies (the "Session Diary" title and the "Files Changed" bullet format), also stranded on `master` since `2803169`.
+
+### Notes
+- Content bump; skill count unchanged, no skill added or removed. The stranding root cause is now guarded by `.claude/rules/skill-release.md` (a `skills/` change is unshipped until a version bump and `master` push) and documented in `RELEASING.md`.
+
+## v3.6.1 - 2026-07-31 - Bridge: cwd-corroborated auto-registration
+
+### Fixed
+- **Diary saves in projects the loader's memory store had never seen no longer vanish.** A project with no prior rows had no way to enter the store, so it stayed skipped forever and its insights never reached cross-project memory. The bridge now falls back to the current working directory (which is the project root, since the diary invokes the script from there) and auto-registers. Registration is gated on cwd's basename matching the supplied name, which is the entire safety story: a project cannot be typo'd into existence, because the typo would not match the directory the process is running in. A genuine ambiguous collision is never auto-registered either, even when cwd matches, since picking one side would silently attach the insight to the wrong project. First-time registration is surfaced as `project_autoregistered` so a wrong path is noticeable immediately rather than months later.
+- **The bridge stops calling every failure "unknown project."** `resolve_project_dir_by_name` returns `None` for both "never seen" and "this basename belongs to two different directories", and the bridge reported both identically, wording that sent one investigation looking for a registration that was never missing. Three distinct reasons are now reported: unknown (no name / no cwd), ambiguous (with the colliding path count), and unrecognized-with-cwd-basename.
+
+### Notes
+- Prefers the loader's `find_project_dirs_by_name` (**memstack-skill-loader 4.14.0+**) and degrades to `resolve_project_dir_by_name` on older loaders, where ambiguity simply stays unreportable: no worse than before, and it still refuses rather than guesses.
+- The fix itself landed in `27c3e86` **under the static 3.6.0 version string**, which meant clients holding a cached 3.6.0 would never re-pull it (see `VERSIONING.md` §5). This version bump is what actually serves it.
+
+## v3.6.0 - 2026-07-23 - Diary Lv.8: FACTS block (cross-session memory)
+
+### Added
+- **The diary skill now appends a `## FACTS` block**: atomic, machine-parsed cross-session knowledge, one fact per line as `subject | claim | method [| entities]`. Only facts worth remembering across sessions; verified over reported; corrections of prior beliefs are the highest-value entries. New protocol step 8 ingests the block into the Memory Engine via `python -m memstack_skill_loader.diary_ingest`, fail-open and dedupe-safe, mirroring the devlog-webhook by-path pattern.
+
+### Notes
+- Requires the companion loader release (**memstack-skill-loader 4.13.0** on PyPI) for the `diary_ingest` module step 8 calls and the SessionStart living-memory injection that reads the facts back. Diary SKILL.md is now version 1.1.0.
+- Content bump so the marketplace serves the updated diary skill (the plugin ships `skills/` verbatim from the version-keyed cache).
+
+## v3.5.7 - 2026-07-16 - Diary Step 5: deliberate insight types
+
+### Changed
+- **The diary skill's Step 5 no longer hardcodes `"type":"decision"`.** It now lists the seven canonical insight types: `gotcha`, `lesson`, `pattern`, `warning`, `failed_approach`, `architecture`, `decision`, each with when-to-use guidance, and states the procedural-vs-record distinction: the first five are **procedural** (an agent can act on them at retrieval time), while `architecture` and `decision` are **record**. Previously every insight was filed as `decision`, collapsing the vocabulary that cross-project search depends on.
+
+### Notes
+- Content-only bump. `skills/` ships verbatim, so `d0c04d2` changed what 3.5.6 served without moving its version; 3.5.7 restores the invariant that shipped content and version advance together. Skill count is unchanged.
+
+## Skills - 2026-07-11 - video-review Pro skill
+
+### Added
+- **video-review Pro skill**: Claude Code watches an existing video (YouTube URL or local file), downloads it, extracts frames, pulls a transcript, and reviews what is actually on screen. Built for demos, UI walkthroughs, screen recordings, and content clips.
+  - Engine vendored from **bradautomates/claude-video** (MIT, attributed in-skill).
+  - Windows-hardened: platform-aware install hints, UTF-8 console self-defense, preflight probes for `deno` and `curl_cffi` (now required by yt-dlp for YouTube downloads).
+
+### Notes
+- **Skill count: 129 total** (85 free + 44 Pro-exclusive).
+- **Pro users**: delivered automatically within 24 hours, or instantly via `refresh_pro_skills`.
+- **Loader release**: `memstack-skill-loader` **4.8.0** on PyPI.
+
+## v3.5.6 - 2026-07-09 - Hooks Execute-Bit Fix (Linux/macOS SessionStart)
+
+### Fixed
+- **SessionStart hook now runs on Linux/macOS.** `hooks/run-hook.cmd` shipped without the execute bit (mode `100644`) from its introduction on 2026-04-07 (`b7d09fa`). Because the plugin invokes the wrapper directly as a command, Unix shells rejected it with "Permission denied", so the SessionStart context injection (the "call `find_skill` first" priming) **silently never ran on Linux/macOS**, and skill auto-loading never fired for Mac/Linux users. Both `hooks/run-hook.cmd` and `hooks/session-start` are now marked executable (`100755`).
+- Windows was unaffected: its `cmd.exe` branch does not require the execute bit.
+
+Reported by **ahpoblete** (issue #12). Thank you!
+
+## Security - 2026-07-07 - Diary devlog webhook remediation (disclosure timeline documented)
+
+Documents, in response to a good-faith disclosure (issue #10), a resolved data-exfiltration issue in this repository's own project-level agent rules, and corrects a prior inaccurate public statement about it.
+
+### What happened
+- From **2026-03-01** (commit `fc2f38e`) to **2026-04-06** (commit `4bcca79`), the project-level agent rules file `.claude/rules/diary.md` contained an **unconditional, hardcoded POST** that sent the full session journal to a personal n8n webhook. There was no environment-variable gate and no key check. It was a leftover from a personal development setup.
+
+### Scope
+- The webhook existed **only** in `.claude/rules/diary.md` (this repository's own project rules), **never** in the distributed plugin. The plugin ships `skills/` only; the webhook never appeared in `skills/diary/SKILL.md`. This is verifiable: the endpoint URL appears in exactly two commits (`fc2f38e` and `4bcca79`), both touching only that rules file.
+- **Marketplace-plugin installs were never affected.** The only exposure surface was environments running Claude Code inside a clone of this repository during that window.
+
+### Remediation
+- `4bcca79` (**2026-04-06**) replaced the hardcoded POST with an opt-in, `MEMSTACK_DEVLOG_WEBHOOK` env-gated version: no data leaves the machine unless that variable is explicitly set.
+- `43a9dd0` (**2026-05-27**) later removed the rules file entirely.
+
+### Correction of record
+- A prior public statement cited the wrong commit (`446f6d0`, which hardened a **separate** hook mechanism) and incorrectly stated that an empty-API-key check protected the diary POST. That is inaccurate: the diary POST had **no** key check and was **unconditional** during the window above. This entry corrects the record.
+
+### Data
+- The only journal data that reached the endpoint was the maintainer's own. No third-party data was transmitted, because the webhook was never present in the shipped plugin.
+
+## v3.5.5 - 2026-06-29 - TokenStack Skill Refresh
+
+### Changed
+- **token-optimization skill**: description and content refreshed to center **TokenStack™** as the sole built-in compression proxy; dropped the retired Headroom / RTK / Serena three-layer framing. Skill-content/description refresh only: **no new skills**; total stays **128** (85 free + 43 Pro-exclusive).
+
+### Notes
+- Plugin-track patch (Option A): plugin → **3.5.5**, loader unchanged at **4.5.1**. Republished so the marketplace bundle refreshes: the version-string bump is what forces clients to re-pull the corrected skill (`/plugin marketplace update` keys on the version *differing*, not on semver ordering). GitHub Releases are human-facing only and not required for propagation.
+
+## v3.5.4 - 2026-06-23 - Documentation Alignment + Skill-Change Guardrails
+
+### Added
+- **git-guard skill** (free): installer + verifier for the secret-blocking git setup (gitleaks + pre-commit/pre-push hooks). Added to all skill catalogs with conformed naming.
+- **ADDING-SKILLS.md**: canonical maintainer checklist for adding, removing, renaming, or re-counting skills: 16 count locations, the two-tier free/Pro scheme, and the 3-channel update architecture (marketplace plugin, PyPI loader, Pro site).
+- **CLAUDE.md pointer**: mandatory reference to ADDING-SKILLS.md before any skill add/remove/rename/recount, so the checklist can't be skipped.
+
+### Changed
+- **Skill counts corrected to 128**: 128 total (85 free + 43 Pro-exclusive) across README, MEMSTACK, SKILL-REFERENCE, and catalogs.
+- **Install docs**: restored the marketplace install step and documented the 3-channel update path.
+- **Compression proxy**: removed deprecated Headroom; TokenStack™ is now the sole context-compression proxy.
+- **Doc version alignment**: README badge, MEMSTACK title + changes-line, and SKILL-REFERENCE footer set to v3.5.4 (see versioning note below).
+- **Version bumps**: plugin manifests advanced to 3.5.2, then 3.5.3.
+- **Skill-count drift enforcement** (cross-repo): `check_skill_drift.py` now fails on skill-count drift. Primary changelog entry lives in the memstack-skill-loader repo; noted here because it guards this repo's counts.
+
+---
+
+> **Versioning note.** The entry below was originally labeled **v4.3.0**, but the plugin manifest read **3.5.0** on 2026-05-27: the "4.3.0" was an aspirational label that never shipped. It has been re-homed as **v3.5.0-docs** with its body preserved verbatim (including the now-superseded "plugin install" and "all docs updated to v4.3.0" lines) as the honest record of that day's documentation audit. No separate changelog entries exist for v3.5.1 through v3.5.3 (release-only version bumps); versioning resumes at v3.5.4 above.
+
+## v3.5.0-docs - 2026-05-27 - Documentation Audit
+
+### Changed
+- **Skill counts updated**: 127 total (84 free + 43 Pro-exclusive). `database-architect` moved to Pro.
+- **Install method**: Removed deprecated `plugin install` references. Install is now `pip install memstack-skill-loader` + `claude mcp add`.
+- **TokenStack™ branding**: All Headroom references updated to TokenStack™ across README, GETTING-STARTED, SKILL-REFERENCE, and MEMSTACK.
+- **Version bumps**: All docs updated to v4.3.0.
+- **Pro skill list**: Updated to 43 skills (added `database-architect`).
+
+---
+
+## v3.3.4 - 2026-03-28 - Git Audit + Docs Update
+
+### Added
+- **Branching skill** (`skills/branching/SKILL.md`): Enforces dev-branch workflow: all work on `dev`, merge to `master` only after Reviewer confirms.
+- **Dev branch**: Created `dev` branch as default working branch. All new work happens here; `master` is release-only.
+- **SessionStart license nudge**: Hook fires at session start when `MEMSTACK_PRO_LICENSE_KEY` is not set, guiding users through Pro setup.
+- **Tier structure documentation**: All docs now document the free/Pro tier split: 78 free skills, 81 total (78 free + 3 Pro-exclusive: consolidate, context-db, api-docs).
+- **90-day graduation rule**: All new skills default to Pro-exclusive and drop to the free tier after 90 days unless marked permanent-Pro.
+
+### Changed
+- **Full git audit**: Verified entire git history and working tree are clean: no secrets, no .env files, no grace period files, no hardcoded keys. Repo is safe for public visibility.
+- **Delivery model updated**: Removed private GitHub repo references. New model: one public repo + `MEMSTACK_PRO_LICENSE_KEY` activation. Customer pays Stripe ($29) -> gets key via email -> sets env var -> Pro skills unlock.
+- **Docs updated**: README.md, GETTING-STARTED.md, SKILL-REFERENCE.md, MEMSTACK.md, and docs/MARKETPLACE-PREP.md updated with current version (3.3.4), accurate skill counts (81 total), and Pro tier info.
+
+---
+
+## v3.3.3 - 2026-03-24 - Production-Grade Secrets Scanning
+
+### Added
+- **Pre-commit secrets hook** (`pre-commit-secrets.sh`): Scans all staged files before every `git commit` using production-grade detection covering 700+ credential formats across every major cloud provider and API service. Blocks commits containing secrets with redacted output. Falls back to built-in regex scan if production scanner is not installed.
+- **`.gitleaks.toml`**: Project-level scanner configuration excluding test fixtures, example files, `.claude/diary/`, and `.claude/observations/` directories from scanning.
+
+### Changed
+- **Pre-push hook** (`pre-push.sh`): Upgraded from 5-keyword regex scan to production-grade detection (700+ credential formats). Full working-tree scan before every push. Silent fallback to regex if scanner is not installed.
+- **secrets-scanner skill (Lv.3)**: Documented automated hook coverage, fallback behavior, and relationship between manual audits and automated scanning.
+
+---
+
+## v3.3.2 - 2026-03-16 - PostToolUse Observations + SessionStart Context Injection
+
+### Added
+- **PostToolUse observation hook** (`post-tool-monitor.sh`): Captures lightweight observations after every Write, Edit, MultiEdit, and Bash tool call. Logs timestamp, tool name, parsed input summary, and working directory to `.claude/observations/YYYY-MM-DD.md` (daily file, append-only). Uses Python JSON parsing with grep fallback.
+- **SessionStart context loader** (`session-context-load.sh`): On every new CC session, reads last 3 diary entries and last 3 observation files, writes a condensed summary to `.claude/session-context.md` (max 200 lines). Idempotent: overwrites previous context on each session start. Checks both `.claude/diary/` and `memory/sessions/` for diary sources.
+
+### Changed
+- **settings.json**: Added two new independent hook entries (PostToolUse observation monitor, SessionStart context loader) following Option B architecture, each with its own timeout budget, separate from existing hooks.
+
+---
+
+## v3.3.1 - 2026-03-12 - PreCompact Auto-Diary
+
+### Added
+- **PreCompact hook**: Automatically saves a diary snapshot before Claude Code context compaction runs. Captures uncommitted changes, recent commits, shell history, and modified files. Entries saved to `.claude/diary/{date}-compaction.md` with `COMPACTION_INTERRUPTED` flag. Multiple compactions in one day append to the same file. Fully automatic: no user input required.
+
+### Changed
+- **Diary skill (Lv.6)**: Documented PreCompact hook behavior, comparison with manual diary, and session resume guidance.
+
+---
+
+## v3.3.0 - 2026-03-12 - Context DB & API Docs Skills
+
+### Added
+- **context-db**: New Core skill: SQLite-backed facts database per project (`.claude/context.db`). Stores structured knowledge as key/value pairs across 5 categories (decisions, patterns, components, config, gotchas). CC queries only relevant facts instead of reading full CLAUDE.md. Estimates and logs token savings to `.claude/context-db-stats.json`. Includes inbox watcher for auto-ingestion and CLAUDE.md seeding. Inspired by Google ADK Always-On Memory Agent.
+- **api-docs**: New Core skill: fetches current API documentation via Context Hub (`chub`) before CC writes code that calls external APIs. Supports 13 APIs (Supabase, Stripe, SendGrid, Railway, Netlify, Anthropic, OpenAI, Vercel, Cloudflare, Firebase, Resend, Twilio, GitHub). Graceful fallback when chub is not installed. Built on Context Hub by Andrew Ng / AISuite team.
+
+---
+
+## v3.2.2 - 2026-03-01 - Documentation Audit, TTS Notifications, Diary Webhook
+
+### Added
+- **rls-guardian**: New Security skill (7th): auto-generates RLS policies for every new `CREATE TABLE` or `ALTER TABLE` statement, enforcing row-level security by default
+
+### Changed
+- **notify.md**: Pre-prompt voice notification: TTS "Claude needs your attention" now fires BEFORE approval prompts and questions, not just after task completion
+- **diary.md**: Added devlog webhook (step 7): POSTs diary content to n8n endpoint after markdown backup is saved. Fire-and-forget with `.catch()` so webhook failure never blocks diary save
+- **README.md**: Complete rewrite: removed "DRAFT stubs" status (all 75+ skills are implemented), added Key Features section, documented on-demand loading, TTS, webhook, templates breakdown (8 starters + 3 utilities)
+- **MEMSTACK.md**: Version bump to v3.2.2, updated v3.2 changes description
+- **package.json**: Version bump to 3.2.2
+- **CHANGELOG.md**: Full history backfill from project inception
+
+---
+
+## v3.2.1-templates - 2026-03-01 - Starter Templates
+
+### Added: 8 Starter Templates
+- `nextjs-supabase`: Next.js + Supabase full-stack starter
+- `react-node-postgres`: React + Node.js + PostgreSQL starter
+- `saas-starter`: SaaS boilerplate with auth, billing, dashboard
+- `landing-page`: Marketing landing page with conversion optimization
+- `api-backend`: REST/GraphQL API backend starter
+- `chrome-extension`: Chrome extension with Manifest V3
+- `electron-app`: Desktop app with Electron
+- `mobile-react-native`: Mobile app with React Native
+
+---
+
+## v3.2.1-catalog - 2026-03-01 - On-Demand Skill Loading
+
+### Changed: Architecture Overhaul
+- Moved all 59 Pro skills from `.claude/rules/` (always-loaded) to `skills/` (on-demand)
+- Created `pro-skills.md` catalog rule: skills load only when a task matches their triggers
+- Prevents context window bloat from loading 59 skill protocols at session start
+- Upgraded notification system from chime to cross-platform TTS (Windows, macOS, Linux)
+
+---
+
+## v3.2.1-skills - 2026-02-28 to 2026-03-01 - All 59 Skills Implemented
+
+### Security (6 skills)
+- `rls-checker`: Row Level Security policy auditor for Supabase (first production Pro skill)
+- `api-audit`: API endpoint security analysis
+- `secrets-scanner`: Leaked credentials and env file auditor
+- `owasp-top10`: OWASP Top 10 vulnerability checker
+- `dependency-audit`: Package dependency vulnerability scanner
+- `csp-headers`: Content Security Policy header generator
+
+All 4 security skills (rls-checker, api-audit, secrets-scanner, owasp-top10) were refined based on AdminStack audit feedback.
+
+### Deployment (6 skills)
+- `railway-deploy`: Railway platform deployment guide
+- `netlify-deploy`: Netlify deployment and configuration
+- `domain-ssl`: Domain DNS and SSL/HTTPS setup
+- `hetzner-setup`: Hetzner VPS provisioning and configuration
+- `ci-cd-pipeline`: CI/CD pipeline design and setup
+- `docker-setup`: Docker containerization guide
+
+### Development (7 skills)
+- `database-architect`: Database schema design and optimization
+- `api-designer`: REST/GraphQL API architecture
+- `code-reviewer`: Systematic code review protocol
+- `performance-audit`: Application performance analysis
+- `refactor-planner`: Systematic code improvement planning
+- `test-writer`: Comprehensive test generation (unit, integration, component)
+- `migration-planner`: Safe database schema evolution
+
+### Business (7 skills)
+- `proposal-writer`: Professional proposal and pitch generation
+- `sop-builder`: Standard operating procedure documentation
+- `scope-of-work`: Project scope definition and boundaries
+- `invoice-generator`: Professional invoice builder with calculations
+- `contract-template`: Service agreement generator with legal clauses
+- `client-onboarding`: New client setup system with welcome sequence
+- `financial-model`: Business financial projections and unit economics
+
+### Content (8 skills)
+- `blog-post`: SEO-optimized blog article writer
+- `landing-page-copy`: Conversion-focused landing page copy
+- `email-sequence`: Automated email drip sequence builder
+- `youtube-script`: Long-form video script with chapters
+- `twitter-thread`: Viral thread builder with hook formulas
+- `tiktok-script`: Short-form video script with timestamped cues
+- `newsletter`: Email newsletter builder with growth tactics
+- `product-description`: E-commerce listing copy optimizer
+
+### SEO & GEO (6 skills)
+- `site-audit`: Technical SEO site health analysis
+- `keyword-research`: Keyword strategy and opportunity mapping
+- `meta-tag-optimizer`: Meta title/description optimization
+- `schema-markup`: JSON-LD structured data generator
+- `ai-search-visibility`: AI search engine optimization (ChatGPT, Perplexity, etc.)
+- `local-seo`: Local business SEO strategy
+
+### Marketing (8 skills)
+- `sales-funnel`: Full-funnel conversion architecture
+- `facebook-ad`: Meta ads copy and targeting strategy
+- `google-ad`: Search campaign builder with RSA format
+- `launch-plan`: Go-to-market calendar with contingencies
+- `competitor-analysis`: Competitive intelligence report
+- `pricing-strategy`: Revenue-optimized pricing design
+- `lead-magnet`: Opt-in asset and delivery system
+- `webinar-script`: Teach-to-sell presentation script
+
+### Product (6 skills)
+- `prd-writer`: Product requirements document generator
+- `feature-spec`: Detailed feature specification with acceptance criteria
+- `user-story-generator`: Backlog-ready story builder with Given/When/Then
+- `mvp-scoper`: Minimum viable product definition
+- `roadmap-builder`: Strategic Now/Next/Later roadmap
+- `feedback-analyzer`: Customer feedback intelligence and prioritization
+
+### Automation (5 skills)
+- `n8n-workflow-builder`: Visual automation workflow design
+- `webhook-designer`: Secure webhook handler with HMAC verification
+- `cron-scheduler`: Scheduled job design with overlap prevention
+- `api-integration`: System-to-system API connector
+- `content-pipeline`: Multi-platform content automation
+
+---
+
+## v3.2.1-init - 2026-02-28 - Project Initialization
+
+### Added
+- Initialized MemStack Pro repository with complete free MemStack base
+- Created premium skill directory structure across 9 categories
+- Added 3 utility templates: `client-quote`, `handoff`, `project-snapshot`
+- Headroom startup command fix in rules
+- All free base skills, hooks, rules, commands, and database infrastructure included
+
+### Architecture
+```
+MemStack Pro v3.2.2
+├── Free Base (complete MemStack)
+│   ├── Hooks (deterministic)      : pre-push, post-commit, session-start/end
+│   ├── Rules (always-loaded)      : memstack, echo, diary, work, notify, headroom, pro-skills catalog
+│   ├── Commands (slash)           : /memstack-search
+│   └── Skills (19 core)           : Echo, Diary, Work, Forge, Scan, Governor, etc.
+├── Pro Skills (59, on-demand)     : Loaded via catalog when task matches triggers
+│   ├── Security (6)
+│   ├── Deployment (6)
+│   ├── Development (7)
+│   ├── Business (7)
+│   ├── Content (8)
+│   ├── SEO & GEO (6)
+│   ├── Marketing (8)
+│   ├── Product (6)
+│   └── Automation (5)
+└── Templates (11)
+    ├── Starter (8)                : nextjs-supabase, react-node-postgres, saas-starter, etc.
+    └── Utility (3)                : client-quote, handoff, project-snapshot
+```
